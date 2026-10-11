@@ -110,12 +110,6 @@ FAILED_DIR="$RUN_DIR/failed"
 
 mkdir -p "$LOG_DIR" "$DONE_DIR" "$RUNNING_DIR" "$FAILED_DIR"
 
-# Prevent accidentally starting the exact same controller twice.
-exec 9>"$RUN_DIR/controller.lock"
-if ! flock -n 9; then
-  die "Another controller for this job is already running: $JOB_ID"
-fi
-
 chunk_name() {
   printf "%012d-%012d" "$1" "$2"
 }
@@ -145,6 +139,22 @@ if (( STATUS_ONLY )); then
   exit 0
 fi
 
+# Prevent accidentally starting the exact same controller twice.
+# Worker subprocesses explicitly close fd 9 so only this controller owns the lock.
+exec 9>"$RUN_DIR/controller.lock"
+if ! flock -n 9; then
+  die "Another controller for this job is already running: $JOB_ID"
+fi
+
+# Give every docker compose run a deterministic name. This lets us stop exactly
+# this job's containers if the controller receives SIGINT/SIGTERM, and clean up
+# stale containers safely after a crash.
+CONTAINER_PREFIX="influence-backfill-${JOB_ID}-"
+
+stop_active_containers() {
+  docker ps --format '{{.Names}}' 2>/dev/null     | grep -F "$CONTAINER_PREFIX"     | xargs -r docker stop >/dev/null 2>&1 || true
+}
+
 # Stale .running markers are informational only. If there is no .done marker,
 # the chunk will be replayed.
 rm -f "$RUNNING_DIR"/*.running 2>/dev/null || true
@@ -154,6 +164,7 @@ on_interrupt() {
   interrupted=1
   echo
   echo "Stopping active retrievers..."
+  stop_active_containers
   jobs -pr | xargs -r kill 2>/dev/null || true
   wait 2>/dev/null || true
   echo "Interrupted. Run the same command again to resume."
@@ -169,8 +180,13 @@ run_chunk() {
   local running
   local failed
   local done_tmp
+  local container_name
+
+  # Do not let worker subprocesses inherit the controller lock.
+  exec 9>&-
 
   name="$(chunk_name "$start" "$end")"
+  container_name="${CONTAINER_PREFIX}${start}-${end}"
   log="$LOG_DIR/$name.log"
   running="$RUNNING_DIR/$name.running"
   failed="$FAILED_DIR/$name.failed"
@@ -186,9 +202,12 @@ run_chunk() {
 
   echo "START $start -> $end"
 
+  # A hard crash may leave a stopped container with this deterministic name.
+  docker rm -f "$container_name" >/dev/null 2>&1 || true
+
   (
     cd "$PROJECT_DIR" || exit 1
-    docker compose -f "$COMPOSE_PATH" --profile "$PROFILE" run --rm "$SERVICE"       npm run starknetEventRetriever --       --run-once       "--fromBlock=$start"       "--toBlock=$end"
+    docker compose -f "$COMPOSE_PATH" --profile "$PROFILE" run --rm       --name "$container_name" "$SERVICE"       npm run starknetEventRetriever --       --run-once       "--fromBlock=$start"       "--toBlock=$end"
   ) > "$log" 2>&1
 
   rc=$?
