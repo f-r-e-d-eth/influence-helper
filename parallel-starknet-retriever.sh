@@ -52,8 +52,16 @@ Important:
 EOF
 }
 
+timestamp() {
+  date '+%Y-%m-%d %H:%M:%S'
+}
+
+log() {
+  echo "[$(timestamp)] $*"
+}
+
 die() {
-  echo "ERROR: $*" >&2
+  echo "[$(timestamp)] ERROR: $*" >&2
   exit 1
 }
 
@@ -129,11 +137,11 @@ for (( start=FROM; start<=TO; start+=CHUNK_SIZE )); do
   fi
 done
 
-echo "Job:        $FROM -> $TO"
-echo "Workers:    $WORKERS"
-echo "Chunk size: $CHUNK_SIZE"
-echo "Progress:   $done_chunks/$total_chunks chunks complete"
-echo "State:      $RUN_DIR"
+log "Job:        $FROM -> $TO"
+log "Workers:    $WORKERS"
+log "Chunk size: $CHUNK_SIZE"
+log "Progress:   $done_chunks/$total_chunks chunks complete"
+log "State:      $RUN_DIR"
 
 if (( STATUS_ONLY )); then
   exit 0
@@ -163,11 +171,11 @@ interrupted=0
 on_interrupt() {
   interrupted=1
   echo
-  echo "Stopping active retrievers..."
+  log "Stopping active retrievers..."
   stop_active_containers
   jobs -pr | xargs -r kill 2>/dev/null || true
   wait 2>/dev/null || true
-  echo "Interrupted. Run the same command again to resume."
+  log "Interrupted. Run the same command again to resume."
   exit 130
 }
 trap on_interrupt INT TERM
@@ -193,14 +201,14 @@ run_chunk() {
   done_tmp="$DONE_DIR/$name.done.tmp"
 
   if [[ -f "$DONE_DIR/$name.done" ]]; then
-    echo "SKIP  $start -> $end"
+    log "SKIP  $start -> $end"
     return 0
   fi
 
   rm -f "$failed" "$done_tmp"
   printf 'pid=%s\nstarted=%s\nrange=%s-%s\n'     "$BASHPID" "$(date --iso-8601=seconds)" "$start" "$end" > "$running"
 
-  echo "START $start -> $end"
+  log "START $start -> $end"
 
   # A hard crash may leave a stopped container with this deterministic name.
   docker rm -f "$container_name" >/dev/null 2>&1 || true
@@ -221,7 +229,7 @@ run_chunk() {
     } > "$done_tmp"
     mv "$done_tmp" "$DONE_DIR/$name.done"
     rm -f "$failed"
-    echo "DONE  $start -> $end"
+    log "DONE  $start -> $end"
     return 0
   fi
 
@@ -231,7 +239,7 @@ run_chunk() {
     echo "exit_code=$rc"
     echo "log=$log"
   } > "$failed"
-  echo "FAIL  $start -> $end (exit $rc; log: $log)" >&2
+  echo "[$(timestamp)] FAIL  $start -> $end (exit $rc; log: $log)" >&2
   return "$rc"
 }
 
@@ -281,13 +289,13 @@ for (( start=FROM; start<=TO; start+=CHUNK_SIZE )); do
 done
 
 echo
-echo "Finished: $done_chunks/$total_chunks chunks complete."
+log "Finished: $done_chunks/$total_chunks chunks complete."
 
 if (( failed_any != 0 || missing_chunks != 0 )); then
-  echo "$missing_chunks chunk(s) remain unfinished."
-  echo "Run the same command again to retry only unfinished chunks."
+  log "$missing_chunks chunk(s) remain unfinished."
+  log "Run the same command again to retry only unfinished chunks."
   exit 1
 fi
 
-echo "All requested Starknet ranges completed successfully."
-echo "You can now restart the Influence event processor/indexer and let them catch up."
+log "All requested Starknet ranges completed successfully."
+log "You can now restart the Influence event processor/indexer and let them catch up."
