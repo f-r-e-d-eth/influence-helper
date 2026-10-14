@@ -2,6 +2,12 @@
 
 Small maintenance tools for running a private [Influence](https://www.influenceth.io/) stack.
 
+## Recovery documentation
+
+- [Empty database recovery](database-rebuild/README.md) — the full successful rebuild sequence, including the parallel historical replay, Mongo index synchronization, legacy Orbit bootstrap, asteroid reindex and the known six-phantom-asteroid anomaly.
+- [Phantom asteroid Elasticsearch issue](phantom-asteroid-elasticsearch/README.md) — investigation and targeted workaround for the six stale asteroid-shell documents.
+
+
 The first tool in this repository is a **parallel, crash-resumable Starknet event backfill** helper. It was built while rebuilding an Influence prerelease database from Starknet Sepolia history.
 
 ## Why this exists
