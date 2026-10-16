@@ -17,6 +17,7 @@ These tests do not establish complete event coverage or prove that all game stat
 
 - `download_events.py`: standalone Python 3 downloader. Resumes by completed block-range file; supports pagination and retry. No dependencies beyond the standard library.
 - `verify_block.py`: compare *all* archive events for a specified block/contract with records in the existing MongoDB database (read-only).
+- `verify_range.py`: stream the MongoDB cursor and compare all archive events in a block range, one archive file at a time (read-only).
 - `.gitignore`: excludes archives, credentials, snapshots and local outputs.
 
 ## Download sample (Sepolia)
@@ -37,6 +38,16 @@ python3 verify_block.py --file events-testnet/sepolia_dispatcher_70000_70000.jso
 Defaults: Mongo container `mongodb`, database `pre-release`. Requires `mongosh` inside the container and the container's `MONGO_INITDB_ROOT_USERNAME` / `MONGO_INITDB_ROOT_PASSWORD` environment variables. This is strictly read-only.
 
 The verification compares event occurrence counts after normalizing numeric hexadecimal fields. MongoDB may retain a different subset of events or processing metadata; mismatches require investigation. Chain RPC is the primary source for completeness verification, not MongoDB alone.
+
+## Verify the historical sample (60,000–70,000)
+
+Using the original local downloader filenames (which were named `asteroid_...` although the source was the Sepolia Dispatcher):
+
+```sh
+python3 verify_range.py --dir ../../events-testnet --start 60000 --end 70000
+```
+
+Run this from the `event-archive` directory inside the cloned repository, or pass the correct absolute path via `--dir`. Files are checked for contiguous coverage. The script compares hexadecimal-normalized transaction, contract, key and data fields, counting duplicate event occurrences. It reports discrepancies and returns a nonzero exit code when events differ. The script assumes the downloaded block files come from the specified contract and MongoDB is synchronized through the range; it does **not** prove independent blockchain completeness.
 
 ## Roadmap
 
