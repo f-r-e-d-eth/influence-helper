@@ -31,7 +31,7 @@ def main():
     if args.end < args.start or args.start < 0:
         p.error("Invalid block range")
     address = hx(args.contract)
-    pattern = re.compile(r"^" + re.escape(args.prefix) + r"(\\d+)_(\\d+)\\.jsonl$")
+    pattern = re.compile(r"^" + re.escape(args.prefix) + r"(\d+)_(\d+)\.jsonl$")
     selected = []
     for path in args.dir.glob("*.jsonl"):
         m = pattern.fullmatch(path.name)
