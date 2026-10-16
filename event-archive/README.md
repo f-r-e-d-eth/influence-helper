@@ -67,6 +67,46 @@ The diagnostic uses the normalized transaction and contract addresses, compares 
 
 **Decision rule:** event differences alone are not enough to recommend rebuilding the game state. First establish whether differences affect finalized canonical events, whether the event processor is idempotent, and whether derived component/entity state is wrong. Compare regenerated state in an isolated database against the current instance before choosing a destructive rebuild; never rebuild the working database as a diagnostic.
 
+
+## Mainnet first-block smoke test (isolated lab, NOT a playable database)
+
+`mainnet_first_block.py` is a cautious first-block experiment: it verifies SN_MAIN and the requested block hash, queries seven known Mainnet Influence contract addresses with pagination, writes JSONL plus a SHA-256 manifest, and can optionally import the **raw** records into a new MongoDB container that is isolated with `--network none`. It does not use or change the existing Testnet `mongodb` container, `pre-release` database, or Influence server.
+
+Run after the local Juno Mainnet archive has been extracted and the Mainnet RPC endpoint is operational:
+
+```sh
+cd ~/Influence-Mainnet
+python3 influence-helper/event-archive/mainnet_first_block.py \\
+  --rpc http://127.0.0.1:6061/v0_10 --block 218425
+```
+
+**The example port 6061 is not configured by the script**; replace it with your actual separate Mainnet RPC endpoint. The default run downloads the first block's events but does not touch MongoDB. After reviewing output, optionally add `--import-mongo` on a fresh run with a new `--output` directory to create the isolated container `influence-mainnet-lab-mongo`, Docker volume `influence-mainnet-lab-mongo-data`, and database `influence_mainnet_lab`. The script refuses to overwrite existing archives or reuse an existing named lab container. MongoDB is network-disabled and is accessible only through `docker exec`. If the first block has zero events, the script does not create the lab; test the next relevant block rather than inventing seeded events.
+
+**Not yet implemented:** replay with the upstream handler pipeline, component migrations, IPFS asteroid seed snapshots, Ethereum events, Elasticsearch/indexer, production bootstrap checkpoints, and live-game API validation. The first-block smoke test proves only the raw event acquisition/import path. The full build must start with the upstream mainnet environment/config in completely separate services/volumes and enforce stable canonical transaction/event indices.
+
+### Intended stack and execution order
+
+```text
+Mainnet Juno (archive, fully synced)
+    |
+    +-- Starknet raw events (+ Ethereum L1 events, separate historical source)
+    |     |
+    |     +-- versioned JSONL / Zstd / hashes / block attestations / IPFS
+    |               |
+    +--------------> replay + event handlers --> isolated MongoDB (events, entities, components)
+                                                   |
+IPFS asteroid seed snapshot -----------------------+
+                                                   |
+                                            ElasticSearch indexer
+                                                   |
+                                             API server / client
+                                                   |
+                                        Compare random warehouses with live API
+```
+
+Suggested stages: (1) verify snapshot/extraction and Mainnet RPC; (2) read the origin block into isolated raw MongoDB; (3) integrate the real Influence event retriever and processor against dedicated Mainnet services; (4) bootstrap IPFS-sourced static asteroid data and Ethereum historical events; (5) index Elasticsearch and expose API/client; (6) compare actual inventories/components to live Mainnet. **Never use an existing Testnet MongoDB volume for an experiment.**
+
+
 ## Roadmap
 
 1. Verify entire blocks/ranges against independent RPC sources, including empty blocks and complete pagination.
