@@ -107,6 +107,17 @@ IPFS asteroid seed snapshot -----------------------+
 Suggested stages: (1) verify snapshot/extraction and Mainnet RPC; (2) read the origin block into isolated raw MongoDB; (3) integrate the real Influence event retriever and processor against dedicated Mainnet services; (4) bootstrap IPFS-sourced static asteroid data and Ethereum historical events; (5) index Elasticsearch and expose API/client; (6) compare actual inventories/components to live Mainnet. **Never use an existing Testnet MongoDB volume for an experiment.**
 
 
+## Architecture Overview
+
+<p align="center">
+  <img src="assets/independent-influence-mainnet-stack.png" alt="Independent Influence Mainnet Stack" width="100%">
+</p>
+
+<p align="center"><em>
+Concept infographic for the long-term goal: from Starknet Mainnet data to a locally playable Influence client.
+Fun placeholder for now — we can replace it later with a cleaner technical diagram.
+</em></p>
+
 ## Roadmap
 
 1. Verify entire blocks/ranges against independent RPC sources, including empty blocks and complete pagination.
