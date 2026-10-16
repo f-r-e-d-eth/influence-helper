@@ -1,0 +1,9 @@
+*.jsonl
+*.zst
+*.aria2
+*.tmp
+.env
+snapshots/
+events/
+events-testnet/
+__pycache__/
