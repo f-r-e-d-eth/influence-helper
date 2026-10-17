@@ -112,3 +112,15 @@ docker logs --tail 15 influence-juno-mainnet
 ```
 
 These observations are a **baseline dated 2026-10-17**, not a guarantee of future storage consumption or reproducibility across versions.
+
+## IPFS package milestone (2026-10-17)
+
+- First aligned raw event chunk `218425–218999`: **22 events**, compressed **3,033 bytes**, verified locally.
+- Eleven contiguous chunks `218425–228999`: **76 events**, **8,034 bytes** of compressed payload. The first range is partial, followed by ten 1,000-block ranges. Packager output: `package_218425_228999` with `manifest.json`, and top-level `catalog.json`. Catalog schema `influence-event-catalog-v1`, initial package CID field null.
+- Kubo Docker image `ipfs/kubo:v0.43.1` started as `influence-ipfs`, using separate persistent volume `influence-ipfs-data`; package directory bind-mounted read-only to `/export`. Peer ports 4001 TCP/UDP exposed; administrative API (5001) and gateway (8080) **not published to the host**. Daemon reported ready.
+- Command: `docker exec influence-ipfs ipfs add -r --cid-version=1 /export/package_218425_228999`
+- Resulting UnixFS directory CID (root): **`bafybeidqd2ckciwnimm4nhdsyogliybaq4ezv5wnw6hsiku7no5x5wuys4`**.
+- Some empty 1,000-block archives had identical CIDs, demonstrating content reuse for identical files.
+- A local `ipfs get`/bytewise comparison and external-peer retrieval are **next verification steps**, not yet observed as successful. IPFS content availability requires ongoing pinning and network reachability.
+- The master `catalog.json` is not yet updated with the CID, published, versioned, or authenticated.
+
