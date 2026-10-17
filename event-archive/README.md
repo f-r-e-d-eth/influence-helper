@@ -72,6 +72,45 @@ The diagnostic uses the normalized transaction and contract addresses, compares 
 **Decision rule:** event differences alone are not enough to recommend rebuilding the game state. First establish whether differences affect finalized canonical events, whether the event processor is idempotent, and whether derived component/entity state is wrong. Compare regenerated state in an isolated database against the current instance before choosing a destructive rebuild; never rebuild the working database as a diagnostic.
 
 
+## Prototype: 1,000-block units packaged into ~10 MB IPFS folders
+
+**Proposed format:** canonical ranges end at multiples of 1,000 minus one, with the initial partial range `218425–218999`. Each source chunk retains its archive and cryptographic manifest; `package_mainnet_chunks.py` copies archived event payloads into distribution folders until adding another would exceed the target of **10,000,000 bytes**. A single oversized chunk gets its own package. It writes one `manifest.json` in each package and a top-level `catalog.json` containing block ranges and placeholder `cid: null` values. The catalog is **not** yet a decentralized registry. Neither IPFS publication nor a real database replay is included.
+
+**First test (Juno on localhost:6061):**
+
+```sh
+cd ~/Influence-Mainnet/influence-helper
+git pull
+cd event-archive
+python3 build_mainnet_chunks.py --rpc http://127.0.0.1:6061/v0_10 \\
+  --start 218425 --end 218999 --step 575 --compress \\
+  --out ~/Influence-Mainnet/aligned-mainnet-chunks
+
+python3 package_mainnet_chunks.py \\
+  --chunks ~/Influence-Mainnet/aligned-mainnet-chunks \\
+  --out ~/Influence-Mainnet/mainnet-packages \\
+  --target-bytes 10000000
+
+python3 package_mainnet_chunks.py --verify-only \\
+  --out ~/Influence-Mainnet/mainnet-packages
+```
+
+Use a **new empty output directory** for each packaging attempt; the packager refuses to overwrite existing published-looking packages. The earlier experimental chunk `218425–218449` is deliberately **not aligned** and must not be mixed with the new canonical range. The chunk builder already supports any explicit range and step; once at block 219000, use `--step 1000` for `219000–219999`, etc.
+
+Folder example:
+
+```text
+mainnet-packages/
+  catalog.json
+  package_218425_218999/
+    manifest.json
+    218425_218999.jsonl.zst
+```
+
+Later use `ipfs add -r <package-folder>` to obtain a UnixFS directory CID, pin the content, and publish a new version of the catalog with the resulting CID; do **not** insert the package's own root CID into its manifest because that creates a circular identity problem. A 10 MB *folder* is not a single low-level IPFS block.
+
+**Prototype limitations:** verification checks hashes/counts/coverage and byte sizes against manifests, but does not independently verify every raw event against consensus or reconstruct MongoDB. The first packaging code needs testing on real output. A reliable published system will also need source chunk-manifest provenance, chain reorg/finality policy, immutable catalog versions, CID verification, persistent pinning and multi-source availability.
+
 ## Mainnet chunk builder — portable/IPFS-ready experiment (2026-10-17)
 
 `build_mainnet_chunks.py` writes immutable, content-verifiable **raw Starknet event chunks** split by inclusive block range. Each chunk contains `events.jsonl` (or compressed `events.jsonl.zst`) and `manifest.json` with chain ID, block range, source contract addresses, start/end block hashes, event count and SHA-256 hash. It queries **seven tracked Mainnet contracts**, handles RPC pagination and requires canonical `transaction_index`/`event_index` metadata. Existing chunks are verified before skipping; partial or inconsistent output is not overwritten.
