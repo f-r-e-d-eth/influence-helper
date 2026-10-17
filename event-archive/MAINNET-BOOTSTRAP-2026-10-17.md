@@ -124,3 +124,11 @@ These observations are a **baseline dated 2026-10-17**, not a guarantee of futur
 - A local `ipfs get`/bytewise comparison and external-peer retrieval are **next verification steps**, not yet observed as successful. IPFS content availability requires ongoing pinning and network reachability.
 - The master `catalog.json` is not yet updated with the CID, published, versioned, or authenticated.
 
+### External storage verification: Filebase (2026-10-17)
+
+- Created an IPFS bucket on Filebase. Exported the locally added folder using `ipfs dag export <rootCID>` to a **14 KB CAR** file.
+- Imported the CAR to Filebase and confirmed that the object shown in the bucket bears the **same UnixFS root CID**: `bafybeidqd2ckciwnimm4nhdsyogliybaq4ezv5wnw6hsiku7no5x5wuys4`.
+- Successfully opened `https://ipfs.filebase.io/ipfs/bafybeidqd2ckciwnimm4nhdsyogliybaq4ezv5wnw6hsiku7no5x5wuys4/manifest.json` in a browser. The JSON reports 76 events, mainnet chain ID `0x534e5f4d41494e`, and the first archive range 218425–218999 with digest `d1b1c37015031907f5d9523fc0f42a02696687a94623eda8dec17fb1004d6eca` matching the local manifest.
+- Direct public retrieval from the home Kubo node had stalled; diagnostics via `ipfs swarm addrs autonat` reported `Reachability: Private` (UDP 4001 unavailable directly). User prefers **not to open home-router ports**. Filebase CAR upload provides an outbound-only path.
+- Verified **remote manifest retrieval**, not yet independent download and SHA-256 validation of all 11 compressed event files. Catalog currently has `cid: null` on disk; next step is to update that entry, verify the catalog, and consider publishing/versioning the catalog itself.
+
