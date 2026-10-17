@@ -72,6 +72,27 @@ The diagnostic uses the normalized transaction and contract addresses, compares 
 **Decision rule:** event differences alone are not enough to recommend rebuilding the game state. First establish whether differences affect finalized canonical events, whether the event processor is idempotent, and whether derived component/entity state is wrong. Compare regenerated state in an isolated database against the current instance before choosing a destructive rebuild; never rebuild the working database as a diagnostic.
 
 
+## Mainnet chunk builder — portable/IPFS-ready experiment (2026-10-17)
+
+`build_mainnet_chunks.py` writes immutable, content-verifiable **raw Starknet event chunks** split by inclusive block range. Each chunk contains `events.jsonl` (or compressed `events.jsonl.zst`) and `manifest.json` with chain ID, block range, source contract addresses, start/end block hashes, event count and SHA-256 hash. It queries **seven tracked Mainnet contracts**, handles RPC pagination and requires canonical `transaction_index`/`event_index` metadata. Existing chunks are verified before skipping; partial or inconsistent output is not overwritten.
+
+First small experiment (requires running Mainnet Juno RPC on 6061; read-only against Juno, no MongoDB changes):
+
+```sh
+cd ~/Influence-Mainnet/influence-helper
+git pull
+cd event-archive
+python3 build_mainnet_chunks.py --rpc http://127.0.0.1:6061/v0_10 \\
+  --start 218425 --end 218449 --step 25 --compress \\
+  --out ~/Influence-Mainnet/mainnet-chunks
+python3 build_mainnet_chunks.py --verify-only \\
+  --out ~/Influence-Mainnet/mainnet-chunks
+```
+
+Requires installed `zstd` when using `--compress`; otherwise Python standard library is sufficient. The chunk directory naming `blocks_START_END` allows storing files on external media or publishing the *complete directory* through IPFS later. **The script does not upload to IPFS or build an Influence MongoDB.** IPFS CIDs and a signed root catalog are future features; SHA-256 verifies bytes but does not authenticate the publisher. A future replayer should consume a validated manifest catalog in order, decode event types through the correct handler version, add static IPFS asteroid data / Ethereum historical state, and build the application's MongoDB collections and indices.
+
+**Scope limitations:** only the seven tracked Mainnet contracts and their raw Starknet events; other contracts and Ethereum events may be required for full reconstruction. Chunk boundary hashes provide basic reorg detection, not complete per-block verification or consensus proof. Before scaling to millions of blocks, benchmark Juno event-query limits, memory usage and compression; define exact canonical indexing, chain-finality policy, and disk budgets. Start with small bounded chunks; do not attempt the full historical sweep in one run.
+
 ## Mainnet first-block smoke test (isolated lab, NOT a playable database)
 
 `mainnet_first_block.py` is a cautious first-block experiment: it verifies SN_MAIN and the requested block hash, queries seven known Mainnet Influence contract addresses with pagination, writes JSONL plus a SHA-256 manifest, and can optionally import the **raw** records into a new MongoDB container that is isolated with `--network none`. It does not use or change the existing Testnet `mongodb` container, `pre-release` database, or Influence server.
