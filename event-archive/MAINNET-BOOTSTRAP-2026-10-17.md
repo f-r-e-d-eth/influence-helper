@@ -132,3 +132,10 @@ These observations are a **baseline dated 2026-10-17**, not a guarantee of futur
 - Direct public retrieval from the home Kubo node had stalled; diagnostics via `ipfs swarm addrs autonat` reported `Reachability: Private` (UDP 4001 unavailable directly). User prefers **not to open home-router ports**. Filebase CAR upload provides an outbound-only path.
 - Verified **remote manifest retrieval**, not yet independent download and SHA-256 validation of all 11 compressed event files. Catalog currently has `cid: null` on disk; next step is to update that entry, verify the catalog, and consider publishing/versioning the catalog itself.
 
+
+### Remote compressed-chunk integrity check
+
+- Downloaded `218425_218999.jsonl.zst` from `https://ipfs.filebase.io/ipfs/bafybeidqd2ckciwnimm4nhdsyogliybaq4ezv5wnw6hsiku7no5x5wuys4/218425_218999.jsonl.zst` using `curl -fL`. Transfer succeeded, **3033 bytes**.
+- `sha256sum /tmp/influence-ipfs-test.zst` returned **`d1b1c37015031907f5d9523fc0f42a02696687a94623eda8dec17fb1004d6eca`**, exactly matching the local package manifest. This confirms remote byte-for-byte integrity for this one chunk.
+- User updated `~/Influence-Mainnet/mainnet-packages-v2/catalog.json` with the folder CID. `package_mainnet_chunks.py --verify-only --out ~/Influence-Mainnet/mainnet-packages-v2` reported `VERIFIED 1 packages, blocks 218425..228999`.
+- Future steps: verify every remotely retrieved chunk, automate CAR creation/upload, publish and version the updated master catalog, test retrieval from a distinct provider, and eventually rebuild the full game database.
