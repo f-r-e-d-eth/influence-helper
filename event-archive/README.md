@@ -13,6 +13,10 @@ Tools for rebuilding and independently verifying Influence blockchain event arch
 
 These tests do not establish complete event coverage or prove that all game state can be rebuilt.
 
+## Mainnet bootstrap field notes
+
+- [2026-10-17: Mainnet Juno snapshot, disk usage, first RPC/event import and worker configuration](MAINNET-BOOTSTRAP-2026-10-17.md) — measured storage baseline, tested commands, and next steps. Treat as a dated experiment, not a complete Mainnet rebuild.
+
 ## Files
 
 - `download_events.py`: standalone Python 3 downloader. Resumes by completed block-range file; supports pagination and retry. No dependencies beyond the standard library.
@@ -126,4 +130,4 @@ Fun placeholder for now — we can replace it later with a cleaner technical dia
 4. Audit Ethereum events and off-chain / seeded state dependencies.
 5. Replay into a disposable database; never replay directly into the working Testnet database.
 
-**Important:** Raw RPC events omit explicit transaction/event indices; deterministic reconstruction must recover canonical event ordering before claiming full replay correctness.
+**Important:** Our local Juno v0.16.8 Mainnet RPC **does supply** `transaction_index` and `event_index` in `starknet_getEvents` results (verified 2026-10-17). Preserve these indices; other RPC providers/versions may differ. Full deterministic replay still requires consistent ordering, handler filtering, and historical state initialization.
