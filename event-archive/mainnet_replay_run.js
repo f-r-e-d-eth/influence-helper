@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /* One-off Mainnet event replay; no modifications to Influence source.
  * Requires --db=influence_mainnet_replay_vN (N>=2).
+ * V2 seeds 30 events from lab.events; V3 seeds 1081 staged events.
  * First run --seed-only; then --max-events=N. Stop immediately on errors.
  * Run ONLY inside isolated MongoDB's network namespace.
  */
@@ -54,10 +55,15 @@ EventConfig.buildHandlerConfig({
 });
 
 const ORDER={blockNumber:1,transactionIndex:1,logIndex:1};
+const IS_V3=DB_TARGET==='influence_mainnet_replay_v3';
+const SOURCE_COLLECTION=IS_V3?'mainnet_v3_staging_events':'events';
+const EXPECTED=IS_V3?1081:30;
 const SEED=modeArgs.length===1 && modeArgs[0]==='--seed-only';
-const replayMatch=modeArgs.length===1 && /^--max-events=([1-9]|[12][0-9]|30)$/.test(modeArgs[0]);
+const replayMatch=modeArgs.length===1 && /^--max-events=[1-9][0-9]*$/.test(modeArgs[0]) &&
+  Number.isSafeInteger(Number(modeArgs[0].split('=')[1])) &&
+  Number(modeArgs[0].split('=')[1])<=EXPECTED;
 if (!SEED && !replayMatch) {
-  console.error('Usage: node mainnet_replay_run.js --db=influence_mainnet_replay_v2 (--seed-only | --max-events=1..30)');
+  console.error('Usage: node mainnet_replay_run.js --db=influence_mainnet_replay_v2|v3 (--seed-only | --max-events=1..'+EXPECTED+')');
   process.exit(2);
 }
 const MAX=replayMatch ? Number(modeArgs[0].split('=')[1]) : 0;
@@ -71,12 +77,26 @@ async function main() {
   if (SEED) {
     const names=(await target.listCollections({}, {nameOnly:true}).toArray()).map(x=>x.name);
     if(names.length) throw Error('Target database is NOT empty: '+names.join(','));
-    const docs=await source.collection('events').find({}).sort(ORDER).toArray();
-    if(docs.length!==30 ||
-       docs.some(e=>e.blockNumber!==219564 || e.removed===true ||
-         e.lastProcessed!=null || !Number.isInteger(e.logIndex)))
+    const docs=await source.collection(SOURCE_COLLECTION).find({}).sort(ORDER).toArray();
+    if(docs.length!==EXPECTED ||
+       docs.some(e=>e.removed===true || e.lastProcessed!=null ||
+         !Number.isInteger(e.logIndex) || !Number.isInteger(e.transactionIndex) ||
+         !Number.isInteger(e.blockNumber) ||
+         (IS_V3 ? e.blockNumber<219564 || e.blockNumber>238471 : e.blockNumber!==219564)))
       throw Error('Unexpected source event data; refusing to seed');
-    if(new Set(docs.map(e=>String(e._id))).size!==30) throw Error('Duplicate event IDs');
+    const identities=docs.map(e=>e.transactionHash+':'+e.logIndex+':'+e.event);
+    if(new Set(identities).size!==EXPECTED ||
+       new Set(docs.map(e=>String(e._id))).size!==EXPECTED)
+      throw Error('Duplicate event identities or IDs');
+    if(IS_V3) {
+      const original=await source.collection('events').find({}).toArray();
+      const first=docs.filter(e=>e.blockNumber===219564);
+      const reference=new Set(original.map(e=>e.transactionHash+':'+e.logIndex+':'+e.event));
+      if(original.length!==30 || first.length!==30 ||
+         first.some(e=>!reference.has(e.transactionHash+':'+e.logIndex+':'+e.event)) ||
+         docs[docs.length-1].blockNumber!==238471)
+        throw Error('V3 seed does not match the verified 30-event reference or endpoint');
+    }
     for(const event of docs) {
       if (!EventConfig.getHandlerByAddressAndEvent({
         address:event.address,eventName:event.event
@@ -94,7 +114,7 @@ async function main() {
   }
   const Event=mongoose.model('Event');
   const total=await Event.countDocuments({});
-  if(total!==30) throw Error('Expected 30 seeded events, found '+total);
+  if(total!==EXPECTED) throw Error('Expected '+EXPECTED+' seeded events, found '+total);
   const pending=await Event.find({lastProcessed:null,removed:{$ne:true}})
     .sort(ORDER).limit(MAX);
   console.log('REPLAY',pending.length,'events; target:',DB_TARGET);
