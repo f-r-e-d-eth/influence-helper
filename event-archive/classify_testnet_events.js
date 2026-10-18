@@ -3,6 +3,8 @@
 // Usage:
 // docker exec -i influence-eventprocessor node -e "$(cat classify_testnet_events.js)" \
 //   < ~/Influence-Mainnet/events-testnet/asteroid_60000_60999.jsonl
+// node -e does not execute the app's normal alias initialization.
+require('module-alias/register');
 const mongoose = require('mongoose');
 const readline = require('readline');
 const StarknetEventConfig = require('/app/src/common/lib/events/retrievers/starknet/config');
