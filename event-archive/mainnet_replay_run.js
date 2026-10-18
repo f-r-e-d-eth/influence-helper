@@ -1,9 +1,25 @@
 #!/usr/bin/env node
 /* One-off Mainnet event replay; no modifications to Influence source.
- * First run with --seed-only. Replay defaults to exactly ONE event.
+ * Requires --db=influence_mainnet_replay_vN (N>=2).
+ * First run --seed-only; then --max-events=N. Stop immediately on errors.
  * Run ONLY inside isolated MongoDB's network namespace.
  */
 'use strict';
+// Validate target before ANY application modules can initialize clients/caches.
+const argv = process.argv.slice(2);
+const dbArgs = argv.filter(x => x.startsWith('--db='));
+const modeArgs = argv.filter(x => !x.startsWith('--db='));
+const dbName = dbArgs.length === 1 ? dbArgs[0].slice(5) : '';
+if (!/^influence_mainnet_replay_v(?:[2-9]|[1-9][0-9]+)$/.test(dbName)) {
+  console.error('Require safe target: --db=influence_mainnet_replay_v2 (or v3, etc.)');
+  process.exit(2);
+}
+const DB_SOURCE='influence_mainnet_lab';
+const DB_TARGET=dbName;
+const MONGO='mongodb://127.0.0.1:27017/' + DB_TARGET;
+// Keyv's Mongo cache uses config.get('MongoDb.uri'), not Mongoose's connection.
+// Enforce the same validated loopback URI for both clients before loading handlers.
+process.env.NODE_CONFIG=JSON.stringify({MongoDb:{uri:MONGO}});
 require('module-alias/register');
 const mongoose = require('mongoose');
 function isolate(name, value) {
@@ -37,18 +53,14 @@ EventConfig.buildHandlerConfig({
   '0x004878d1148318a31829523ee9c6a5ee563af6cd87f90a30809e5b0d27db8a9b': handlers.starknet.Sway
 });
 
-const DB_SOURCE='influence_mainnet_lab';
-const DB_TARGET='influence_mainnet_replay_test';
-const MONGO='mongodb://127.0.0.1:27017/' + DB_TARGET;
 const ORDER={blockNumber:1,transactionIndex:1,logIndex:1};
-const args=process.argv.slice(2);
-const SEED=args.length===1 && args[0]==='--seed-only';
-const replayMatch=args.length===1 && /^--max-events=([1-9]|[12][0-9]|30)$/.test(args[0]);
+const SEED=modeArgs.length===1 && modeArgs[0]==='--seed-only';
+const replayMatch=modeArgs.length===1 && /^--max-events=([1-9]|[12][0-9]|30)$/.test(modeArgs[0]);
 if (!SEED && !replayMatch) {
-  console.error('Usage: node mainnet_replay_run.js --seed-only | --max-events=1..30');
+  console.error('Usage: node mainnet_replay_run.js --db=influence_mainnet_replay_v2 (--seed-only | --max-events=1..30)');
   process.exit(2);
 }
-const MAX=replayMatch ? Number(args[0].split('=')[1]) : 0;
+const MAX=replayMatch ? Number(modeArgs[0].split('=')[1]) : 0;
 
 async function main() {
   await mongoose.connect(MONGO,{serverSelectionTimeoutMS:5000});
