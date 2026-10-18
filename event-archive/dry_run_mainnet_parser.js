@@ -33,7 +33,7 @@ const count=(obj,key)=>{obj[key]=(obj[key]||0)+1;};
 const padded=h=>'0x'+BigInt(h).toString(16).padStart(64,'0');
 async function main(){
   const stats={network:'SN_MAIN',total:0,parsed:0,ignored:0,unhandled:0,failed:0,
-    byParsedEvent:{},byIgnoredEvent:{},byUnrecognizedAddress:{},examples:[],errors:[]};
+    byParsedEvent:{},byIgnoredEvent:{},byUnrecognizedAddress:{},unhandledExamples:[],examples:[],errors:[]};
   const seen=new Set();
   for await(const line of readline.createInterface({input:process.stdin,crlfDelay:Infinity})){
     if(!line.trim())continue;
@@ -52,7 +52,14 @@ async function main(){
     if(seen.has(id))throw Error('Duplicate tx/logIndex '+id);
     seen.add(id);
     const handler=Config.getHandler(event);
-    if(!handler){stats.unhandled++;count(stats.byUnrecognizedAddress,address);continue;}
+    if(!handler){
+      stats.unhandled++;count(stats.byUnrecognizedAddress,address);
+      if(stats.unhandledExamples.length<30)stats.unhandledExamples.push({
+        blockNumber:event.blockNumber,transactionHash:event.transactionHash,
+        logIndex:event.logIndex,address,keys:event.keys,data:event.data
+      });
+      continue;
+    }
     if(handler.ignore){stats.ignored++;count(stats.byIgnoredEvent,handler.eventName);continue;}
     try{
       const parsed=handler.parseEvent(event);
@@ -73,4 +80,9 @@ async function main(){
   console.log(JSON.stringify(stats,(_k,v)=>typeof v==='bigint'?v.toString():v,2));
   if(stats.total===0||stats.failed>0)process.exitCode=1;
 }
-main().catch(e=>{console.error('DRY RUN ERROR:',e.stack||e.message);process.exitCode=1});
+// The imported Influence libraries may leave timers or handles open.
+// This is a disposable, network-isolated diagnostic process: exit once the report is flushed.
+main().then(()=>process.exit(process.exitCode||0)).catch(e=>{
+  console.error('DRY RUN ERROR:',e.stack||e.message);
+  process.exit(1);
+});
