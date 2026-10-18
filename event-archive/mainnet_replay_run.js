@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /* One-off Mainnet event replay; no modifications to Influence source.
  * Requires --db=influence_mainnet_replay_vN (N>=2).
- * V2 seeds 30 events from lab.events; V3/V4 seed validated staging collections.
+ * V2 seeds 30 events from lab.events; V3/V4/V5 seed validated staging collections.
  * First run --seed-only; then --max-events=N. Stop immediately on errors.
  * Run ONLY inside isolated MongoDB's network namespace.
  */
@@ -56,14 +56,15 @@ EventConfig.buildHandlerConfig({
 
 const ORDER={blockNumber:1,transactionIndex:1,logIndex:1};
 const VERSION=Number(DB_TARGET.match(/_v([0-9]+)$/)[1]);
-if(VERSION>4) {
-  console.error('Only validated replay versions v2, v3 and v4 are supported');
+if(VERSION>5) {
+  console.error('Only validated replay versions v2, v3, v4 and v5 are supported');
   process.exit(2);
 }
 const CONFIG={
   2:{collection:'events',count:30,first:219564,last:219564},
   3:{collection:'mainnet_v3_staging_events',count:1081,first:219564,last:238471},
-  4:{collection:'mainnet_v4_staging_events',count:14365,first:219564,last:248170}
+  4:{collection:'mainnet_v4_staging_events',count:14365,first:219564,last:248170},
+  5:{collection:'mainnet_v5_staging_events',count:30312,first:219564,last:328971}
 }[VERSION];
 const SOURCE_COLLECTION=CONFIG.collection;
 const EXPECTED=CONFIG.count;
@@ -72,7 +73,7 @@ const replayMatch=modeArgs.length===1 && /^--max-events=[1-9][0-9]*$/.test(modeA
   Number.isSafeInteger(Number(modeArgs[0].split('=')[1])) &&
   Number(modeArgs[0].split('=')[1])<=EXPECTED;
 if (!SEED && !replayMatch) {
-  console.error('Usage: node mainnet_replay_run.js --db=influence_mainnet_replay_v2|v3|v4 (--seed-only | --max-events=1..'+EXPECTED+')');
+  console.error('Usage: node mainnet_replay_run.js --db=influence_mainnet_replay_v2|v3|v4|v5 (--seed-only | --max-events=1..'+EXPECTED+')');
   process.exit(2);
 }
 const MAX=replayMatch ? Number(modeArgs[0].split('=')[1]) : 0;
@@ -98,10 +99,12 @@ async function main() {
        new Set(docs.map(e=>String(e._id))).size!==EXPECTED)
       throw Error('Duplicate event identities or IDs');
     if(VERSION>=3) {
-      // Compare original 30 identities and, for V4, all 1081 V3 identities.
+      // Compare original 30 identities; verify full V3 ancestry for V4/V5,
+      // and full V4 ancestry for V5.
       const checkpoints=[
         {collection:'events',count:30},
-        ...(VERSION===4?[{collection:'mainnet_v3_staging_events',count:1081}]:[])
+        ...(VERSION>=4?[{collection:'mainnet_v3_staging_events',count:1081}]:[]),
+        ...(VERSION>=5?[{collection:'mainnet_v4_staging_events',count:14365}]:[])
       ];
       for(const checkpoint of checkpoints) {
         const previous=await source.collection(checkpoint.collection).find(
