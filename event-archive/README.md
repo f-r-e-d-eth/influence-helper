@@ -182,6 +182,14 @@ Concept infographic for the long-term goal: from Starknet Mainnet data to a loca
 Fun placeholder for now — we can replace it later with a cleaner technical diagram.
 </em></p>
 
+<p align="center">
+  <img src="../docs/images/influence-vision.png" alt="Influence universe vision: Starknet events packaged into IPFS blocks feeding a local MongoDB and playable asteroid world" width="100%">
+</p>
+
+<p align="center"><em>
+Influence Mainnet vision — a waterfall of Starknet events becomes shareable IPFS archives, rebuilding a local MongoDB world for the player.
+</em></p>
+
 ## Roadmap
 
 1. Verify entire blocks/ranges against independent RPC sources, including empty blocks and complete pagination.
