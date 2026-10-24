@@ -4,9 +4,9 @@
 Contribute a small, reviewable improvement to `adaliafoundation/influence-server` so a fresh Influence database can be initialized reliably before workers start.
 
 ## Background
-During our Influence testnet fresh-database bootstrap, missing MongoDB indexes prevented a reliable startup. We investigated the issue and identified the existing `sync_mongo_indexes.js` script as a required setup step. Chris confirmed this belongs in `adaliafoundation/influence-server`, moved the GitHub issue there, and welcomed a pull request.
+During our Influence testnet fresh-database bootstrap, missing MongoDB indexes prevented a reliable startup. We investigated the issue and identified the existing `sync_mongo_indexes.js` script as a required setup step. The upstream maintainer confirmed this belongs in `adaliafoundation/influence-server`, moved the GitHub issue there, and welcomed a pull request.
 
-## Requested scope (Chris's feedback)
+## Requested scope (upstream maintainer feedback)
 - [ ] Add an explicit npm script for the existing MongoDB index synchronization script.
 - [ ] Document that index synchronization is required **before starting workers** when setting up a fresh database.
 - [ ] Include instructions for both local and Docker usage.
