@@ -2,6 +2,8 @@
 
 An independent, reproducible pipeline from **Starknet Mainnet events** to a locally reconstructed **Influence MongoDB**. Work is divided into two stages.
 
+![Influence vision](../docs/images/influence-vision.png)
+
 | Stage | Goal | Status |
 |---|---|---|
 | [1. Starknet → IPFS](1_Starknet-IPFS/README.md) | Collect, verify and publish self-contained event chunks | Local collector and downloader V1 tested; IPFS publication pending |
