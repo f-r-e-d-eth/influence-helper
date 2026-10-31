@@ -35,15 +35,17 @@ Full narrative, commands and caveats: [2026-10-30 historical report](../history/
 ```text
 1_Starknet-IPFS/
   README.md                 # This overview and current status
-  downloader/               # Verified collector, metadata builder, checker and tests (to migrate)
+  downloader/               # Published V1 collector, metadata builder, checker and instructions
   packaging/                # 100,000-block epoch and smaller delta/IPFS publication tools (future)
   specifications/           # Canonical chunk format, CID rules, provenance and verification (future)
 ```
 
 Create the subdirectories when their implementation is ready; Git doesn't retain empty directories.
 
-## Status and open work
+## Published downloader V1 — 2026-10-31
 
-**Locally implemented but not yet moved into this GitHub folder:** `build_mainnet_chunks.py`, `build_block_metadata.py`, `verify_chunk_metadata.py`, `check_mainnet_chunk.py`, `run_mainnet_download.py`, `DOWNLOADER.md`, and `tests/test_downloader.py`. The older code in `../archive/` is historical and may not reflect these updates.
+The [working downloader](downloader/) is published on GitHub (commit `9b73535`): six Python scripts and [operating instructions](downloader/DOWNLOADER.md). The relocated code passed syntax, dry-run, and a read-only real Mainnet Juno comparison (22 matching events, valid metadata, exit code 0) before publication.
 
-Next: commit and rerun those local scripts in this stage; document their relative-path dependencies and run all tests. Then define deterministic content serialization, immutable ~100,000-block epochs, <=10 MB delta deliveries, a CID catalog, and independent IPFS verification. No IPFS publication is claimed yet.
+The standalone local automated tests and earlier experimental scripts were deliberately **not** published in this clean Stage 1 folder. The original source and test files remain on `bahn`; historical variants in `../archive/` are not current V1 implementations.
+
+Next: design deterministic content serialization, immutable ~100,000-block epochs, <=10 MB delta deliveries, a CID catalog, and independent IPFS verification. No IPFS publication is claimed yet.
