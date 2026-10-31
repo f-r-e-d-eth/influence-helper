@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="390" viewBox="0 0 860 390" role="img" aria-labelledby="t d">
+<title id="t">Influence V9 versus V10 replay throughput</title>
+<desc id="d">For the same 1024 events, V9 processed 163.1 events per second and V10 processed 164.38 events per second. Difference is roughly 0.8 percent, not an established speedup.</desc>
+<rect width="860" height="390" fill="#ffffff"/>
+<text x="40" y="52" font-family="Arial,sans-serif" font-size="26" font-weight="bold" fill="#1c2530">V9 vs V10 — replay throughput</text>
+<text x="40" y="81" font-family="Arial,sans-serif" font-size="15" fill="#546172">Same 1,024 events · isolated MongoDB copies · 2026-10-31</text>
+<line x1="230" y1="110" x2="230" y2="291" stroke="#9ba6b1" stroke-width="1.5"/>
+<text x="40" y="160" font-family="Arial,sans-serif" font-size="20" fill="#25374a">V9 reference</text>
+<rect x="230" y="129" width="489.3" height="46" rx="5" fill="#54708e"/>
+<text x="733" y="158" font-family="Arial,sans-serif" font-size="19" font-weight="bold" fill="#25374a">163.10</text>
+<text x="40" y="248" font-family="Arial,sans-serif" font-size="20" fill="#25374a">V10 benchmark</text>
+<rect x="230" y="217" width="493.1" height="46" rx="5" fill="#178c82"/>
+<text x="736" y="246" font-family="Arial,sans-serif" font-size="19" font-weight="bold" fill="#25374a">164.38</text>
+<text x="230" y="310" font-family="Arial,sans-serif" font-size="15" fill="#546172">0</text>
+<text x="720" y="310" font-family="Arial,sans-serif" font-size="15" fill="#546172">events / second</text>
+<line x1="40" y1="331" x2="820" y2="331" stroke="#dbe0e4"/>
+<text x="40" y="357" font-family="Arial,sans-serif" font-size="14" fill="#546172">V10: +0.78% throughput in this single test; within possible measurement noise.</text>
+</svg>
