@@ -26,6 +26,12 @@ A first attempt to compare the entire restored state (~29 million documents per 
 
 V10 instrumented breakdown: processing **5,847.06 ms**; finalization **369.94 ms**. Timings shown here reflect a **single small benchmark** and must not be extrapolated to a ~17-million-block replay.
 
+### V10 average processing time per event-handler type
+
+![V10 average event-handler processing time](2026-10-31-v10-handler-timing.svg)
+
+The chart divides each handler's **measured total time** by its **occurrence count** and includes both values in the labels. It covers **eight selected handler types**, not every event type, and reflects **V10 handler processing contributions**, not blockchain transaction confirmation latency. Rare handlers (for example, `ConstructionFinished` and `ShipDocked` at only two occurrences each) have particularly uncertain averages; results are from one 1,024-event replay.
+
 ### V10 handler hotspots (measured total wall-clock contributions)
 
 | Handler | Events | Total time | Notes |
