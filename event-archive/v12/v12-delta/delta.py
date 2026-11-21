@@ -355,7 +355,7 @@ def journal_write(path, value, exclusive=False):
         os.close(fd)
 
 
-def apply_package(db, package, journal, scratch, memory_bytes=32*1024*1024, batch_bytes=8*1024*1024):
+def apply_package(db, package, journal, scratch, memory_bytes=32*1024*1024, batch_bytes=8*1024*1024, *, verify_fingerprints=True):
     if db.name == ORIGINAL_DB or not db.name.startswith('v12_disposable_'):
         raise ValueError('Application requires a separate database named v12_disposable_*')
     started = time.monotonic()
@@ -366,7 +366,10 @@ def apply_package(db, package, journal, scratch, memory_bytes=32*1024*1024, batc
         metrics['package_extraction_validation_seconds'] = time.monotonic() - started
         if Path(journal).exists():
             raise FileExistsError('Existing application journal; restore a fresh disposable database before retrying')
-        checkpoint(db, manifest, 'source', scratch, memory_bytes, metrics['starting_checkpoint'])
+        if verify_fingerprints:
+            checkpoint(db, manifest, 'source', scratch, memory_bytes, metrics['starting_checkpoint'])
+        elif metadata(db) != manifest['metadata']:
+            raise ValueError('Source metadata/index mismatch')
         state = dict(status='applying', database=db.name, package_sha256=sha_file(package), completed_operations=0, metrics=metrics)
         metrics['bulk_writes']['collections'] = {
             name: dict(seconds=0.0, batches=0, completed_operations=0, operations_per_second=0.0)
@@ -425,8 +428,12 @@ def apply_package(db, package, journal, scratch, memory_bytes=32*1024*1024, batc
                     batch.append(operation)
                     size += len(raw)
                 flush()
-            checkpoint(db, manifest, 'target', scratch, memory_bytes, metrics['final_checkpoint'])
-            state.update(status='applied_checkpoint_verified', application_seconds=time.monotonic() - started,
+            if verify_fingerprints:
+                checkpoint(db, manifest, 'target', scratch, memory_bytes, metrics['final_checkpoint'])
+            elif metadata(db) != manifest['metadata']:
+                raise ValueError('Target metadata/index mismatch')
+            state.update(status='applied_checkpoint_verified' if verify_fingerprints else 'applied_unverified_benchmark',
+                         fingerprints_verified=verify_fingerprints, application_seconds=time.monotonic() - started,
                          full_comparison_required=True)
             journal_write(journal, state)
         except BaseException as exc:
