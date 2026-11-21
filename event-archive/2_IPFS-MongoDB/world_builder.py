@@ -2,6 +2,8 @@
 """Influence World Builder v0.1 — isolated, verified local reconstruction."""
 import argparse
 import gzip
+import fcntl
+import threading
 import hashlib
 import json
 import os
@@ -126,9 +128,24 @@ def run(args, **kwargs):
     return subprocess.run(args, check=True, **kwargs)
 
 
-def build(manifest_path, source, storage, gateway, end, verify_fingerprints, log, progress):
+def build(manifest_path, source, storage, gateway, end, verify_fingerprints, log, progress, pause=None, resume=None):
+    storage = storage.resolve()
+    if resume is None:
+        storage.mkdir(parents=True, exist_ok=True)
+        job = storage / ('build-'+uuid.uuid4().hex[:12]); job.mkdir()
+    else:
+        job = resume.resolve().parent
+        if resume.name != 'result.json' or not re.fullmatch(r'build-[0-9a-f]{12}', job.name):
+            raise ValueError('Select a paused build result.json')
+    with (job/'build.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, progress, pause, resume, job)
+
+
+def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, progress, pause, resume, job):
     started = time.monotonic()
-    entries = validate(read(manifest_path))
+    manifest_bytes = manifest_path.read_bytes()
+    entries = validate(json.loads(manifest_bytes))
     if end not in [e['end_block'] for e in entries[1:]]:
         raise ValueError('Select a checkpoint in the manifest')
     entries = [e for e in entries if e['end_block'] <= end]
@@ -141,10 +158,32 @@ def build(manifest_path, source, storage, gateway, end, verify_fingerprints, log
     if not shutil.which('docker'):
         raise RuntimeError('Docker is required')
     run(['docker', 'info'], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    storage.mkdir(parents=True, exist_ok=True)
-    job = storage / ('build-'+uuid.uuid4().hex[:12]); job.mkdir()
-    cache = job / 'downloads'; cache.mkdir()
-    scratch = job / 'scratch'; scratch.mkdir()
+    config = dict(manifest=str(manifest_path.resolve()), source=str(source.resolve()), gateway=gateway,
+                  end=end, verify_fingerprints=verify_fingerprints, manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest())
+    name = 'influence-world-'+job.name.removeprefix('build-')
+    info = read(job/'result.json') if resume else None
+    if resume:
+        if (info.get('status') != 'paused' or info.get('config') != config or
+                info.get('container') != name or info.get('volume') != name or info.get('database') != DB):
+            raise ValueError('Not a matching safely paused build')
+        last = info.get('applied_through')
+        if last not in [e['end_block'] for e in entries]:
+            raise ValueError('Invalid paused checkpoint')
+        expected = 'applied_checkpoint_verified' if verify_fingerprints else 'applied_unverified_benchmark'
+        for entry in entries[1:]:
+            journal = job/f'apply-{entry["end_block"]}.json'
+            if entry['end_block'] <= last:
+                record = read(journal)
+                if record['status'] != expected or record['package_sha256'] != entry['sha256']:
+                    raise ValueError('Paused journal mismatch')
+            elif journal.exists():
+                raise ValueError('Unexpected later journal; cannot safely resume')
+        identity = json.loads(run(['docker','inspect',name],capture_output=True,text=True).stdout)[0]
+        if (identity['Id'] != info['container_id'] or identity['State']['Running'] or
+                identity['State']['ExitCode'] != 0 or not any(m.get('Name') == name and m.get('Destination') == '/data/db' for m in identity['Mounts'])):
+            raise ValueError('Paused container missing, changed, or not cleanly stopped')
+    cache = job / 'downloads'; cache.mkdir(exist_ok=True)
+    scratch = job / 'scratch'; scratch.mkdir(exist_ok=True)
     # Check every input before creating a database, and check package block boundaries.
     files = []
     for i, entry in enumerate(entries):
@@ -155,21 +194,38 @@ def build(manifest_path, source, storage, gateway, end, verify_fingerprints, log
                     raise ValueError('Delta block boundary mismatch')
         files.append(path)
         progress(i+1, len(entries)*2+3)
-    name = 'influence-world-'+job.name.removeprefix('build-')
-    log(f'Creating isolated MongoDB container {name} — Docker may download the image on first use. Please wait.')
-    run(['docker','run','-d','--name',name,'--label','influence.world-builder=0.1',
-         '-p','127.0.0.1::27017','-v',name+':/data/db','mongo:7','mongod','--wiredTigerCacheSizeGB','2'], stdout=subprocess.PIPE)
-    port = run(['docker','port',name,'27017/tcp'],capture_output=True,text=True).stdout.strip().splitlines()[0].rsplit(':',1)[1]
-    uri = 'mongodb://127.0.0.1:'+port
-    info = dict(container=name, volume=name, uri=uri, database=DB, status='incomplete', verified_through=None, applied_through=None, fingerprints_verified=verify_fingerprints,
-                timings={'fingerprints_seconds':0.0,'bulk_writes_seconds':0.0,'application_seconds':0.0})
+    if not resume:
+        log(f'Creating isolated MongoDB container {name} — Docker may download the image on first use. Please wait.')
+        container_id = run(['docker','run','-d','--name',name,'--label','influence.world-builder=0.1',
+             '-p','127.0.0.1::27017','-v',name+':/data/db','mongo:7','mongod','--wiredTigerCacheSizeGB','2'], capture_output=True,text=True).stdout.strip()
+        info = dict(container=name, container_id=container_id, volume=name, database=DB, status='incomplete',
+                    verified_through=None, applied_through=None, fingerprints_verified=verify_fingerprints, config=config,
+                    timings={'fingerprints_seconds':0.0,'bulk_writes_seconds':0.0,'application_seconds':0.0})
     def save():
         tmp = job/'result.tmp'
         with tmp.open('w') as stream:
             json.dump(info,stream,indent=2); stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
         os.replace(tmp,job/'result.json')
         fd=os.open(job,os.O_RDONLY); os.fsync(fd); os.close(fd)
-    save()
+    info['status']='incomplete'; save()
+    if resume:
+        log(f'Restarting paused container {name}')
+        run(['docker','start',name])
+    port = run(['docker','port',name,'27017/tcp'],capture_output=True,text=True).stdout.strip().splitlines()[0].rsplit(':',1)[1]
+    uri = 'mongodb://127.0.0.1:'+port
+    info['uri']=uri; save()
+    def pause_at_boundary():
+        if not pause or not pause.is_set(): return False
+        log('Pausing at a completed checkpoint; stopping MongoDB…')
+        run(['docker','stop','-t','120',name])
+        state = json.loads(run(['docker','inspect',name],capture_output=True,text=True).stdout)[0]['State']
+        if state['Running'] or state['ExitCode'] != 0:
+            raise RuntimeError('MongoDB did not stop cleanly; resume refused')
+        info.update(status='paused',uri=None)
+        info['timings']['active_seconds']=info['timings'].get('active_seconds',0)+time.monotonic()-started
+        save()
+        log(f'PAUSED safely — resume using {job}/result.json')
+        return True
     log(f'Build record: {job}/result.json')
     log('Waiting for MongoDB to become ready…')
     with MongoClient(uri,serverSelectionTimeoutMS=2000) as client:
@@ -180,13 +236,19 @@ def build(manifest_path, source, storage, gateway, end, verify_fingerprints, log
                 if attempt == 29: raise
                 time.sleep(1)
         progress(len(entries)+1,len(entries)*2+3)
-        log('Restoring bootstrap — creating collections and indexes…')
-        with files[0].open('rb') as stream:
-            run(['docker','exec','-i',name,'mongorestore','--archive','--gzip','--stopOnError',
-                 '--nsInclude','v12_reconstruction.*','--nsFrom','v12_reconstruction.*','--nsTo',DB+'.*'], stdin=stream)
+        if not resume:
+            log('Restoring bootstrap — creating collections and indexes…')
+            with files[0].open('rb') as stream:
+                run(['docker','exec','-i',name,'mongorestore','--archive','--gzip','--stopOnError',
+                     '--nsInclude','v12_reconstruction.*','--nsFrom','v12_reconstruction.*','--nsTo',DB+'.*'], stdin=stream)
+            info['applied_through']=-1; save()
         progress(len(entries)+2,len(entries)*2+3)
         db = client.get_database(DB,read_concern=ReadConcern('majority'),write_concern=WriteConcern(w='majority',j=True))
         for i, (entry, path) in enumerate(zip(entries[1:],files[1:]),1):
+            if entry['end_block'] <= info['applied_through']:
+                progress(len(entries)+2+i,len(entries)*2+3)
+                continue
+            if pause_at_boundary(): return info
             log(f'Applying{" and verifying" if verify_fingerprints else " (benchmark, no fingerprints)"} through {entry["end_block"]:,}')
             details = []
             for key, label in (('completed_operations','operations'), ('target_documents','target documents')):
@@ -210,6 +272,7 @@ def build(manifest_path, source, storage, gateway, end, verify_fingerprints, log
             if verify_fingerprints: info['verified_through'] = entry['end_block']
             save()
             progress(len(entries)+2+i,len(entries)*2+3)
+    if pause_at_boundary(): return info
     log('Exporting final database as compressed MongoDB archive…')
     export_started = time.monotonic()
     archive = job / (f'adalaris-{end}.archive.gz' if verify_fingerprints else f'adalaris-{end}-UNVERIFIED.archive.gz')
@@ -230,7 +293,7 @@ def build(manifest_path, source, storage, gateway, end, verify_fingerprints, log
     log('Archive saved and gzip checked. Removing temporary MongoDB container and volume…')
     run(['docker','stop','-t','120',name]); run(['docker','rm','-v',name]); run(['docker','volume','rm',name])
     shutil.rmtree(cache); shutil.rmtree(scratch)
-    info['cleanup_complete']=True; info['uri']=None; info['timings']['total_seconds']=time.monotonic()-started; save()
+    info['cleanup_complete']=True; info['uri']=None; info['timings']['total_seconds']=info['timings'].get('active_seconds',0)+time.monotonic()-started; save()
     progress(len(entries)*2+3,len(entries)*2+3)
     log('Archive ready — '+str(archive))
     log(f'Total fingerprint scans: {info["timings"]["fingerprints_seconds"]:.1f} s · bulk writes: {info["timings"]["bulk_writes_seconds"]:.1f} s')
@@ -245,9 +308,9 @@ def gui():
 
     class Worker(QThread):
         message=Signal(str); progress=Signal(int,int); result=Signal(object); failed=Signal(str)
-        def __init__(self,args): super().__init__(); self.args=args
+        def __init__(self,args): super().__init__(); self.args=args; self.pause=threading.Event()
         def run(self):
-            try: self.result.emit(build(*self.args,self.message.emit,self.progress.emit))
+            try: self.result.emit(build(*self.args[:6],self.message.emit,self.progress.emit,pause=self.pause,resume=self.args[6]))
             except Exception as exc: self.failed.emit(str(exc))
 
     class Window(QWidget):
@@ -266,6 +329,9 @@ def gui():
             row=QHBoxLayout(); self.target=QComboBox(); row.addWidget(QLabel('Target checkpoint')); row.addWidget(self.target,1); self.load_button=QPushButton('Load manifest'); row.addWidget(self.load_button); layout.addLayout(row); self.load_button.clicked.connect(self.load)
             self.skip=QCheckBox('Benchmark only — skip database fingerprint scans (UNVERIFIED archive)'); self.skip.setStyleSheet('color:#f7d38b'); layout.addWidget(self.skip)
             self.start=QPushButton('BUILD INFLUENCE WORLD'); self.start.setObjectName('build'); self.start.clicked.connect(self.start_build); layout.addWidget(self.start)
+            controls=QHBoxLayout()
+            self.pause_button=QPushButton('Pause safely'); self.pause_button.setEnabled(False); self.pause_button.clicked.connect(self.request_pause); controls.addWidget(self.pause_button)
+            self.resume_button=QPushButton('Resume paused build…'); self.resume_button.clicked.connect(self.resume_build); controls.addWidget(self.resume_button); layout.addLayout(controls)
             self.bar=QProgressBar(); self.bar.setValue(0); layout.addWidget(self.bar)
             self.status=QLabel('Ready · select a verified manifest'); self.status.setWordWrap(True); layout.addWidget(self.status)
             self.log=QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumBlockCount(500); outer.addWidget(self.log,1)
@@ -306,7 +372,10 @@ def gui():
             self.log.appendPlainText(msg)
             self.phase=msg; self.phase_started=time.monotonic(); self.status.setText(msg)
         def ready(self, result):
-            self.timer.stop(); self.bar.setValue(self.bar.maximum())
+            self.timer.stop()
+            if result['status']=='paused':
+                self.status.setText('Paused safely · resume this build using its result.json'); return
+            self.bar.setValue(self.bar.maximum())
             self.status.setText(('Verified archive ready: ' if result['fingerprints_verified'] else 'UNVERIFIED benchmark archive: ')+result['archive'])
         def failed(self, error):
             self.timer.stop(); self.status.setText('Stopped: '+error); self.log.appendPlainText('ERROR: '+error)
@@ -314,11 +383,30 @@ def gui():
             if self.worker and self.worker.isRunning(): return
             if self.target.currentData() is None: self.status.setText('Load a valid manifest first'); return
             for k in ('manifest','source','storage','gateway'): self.settings.setValue(k,getattr(self,k).text())
-            args=(Path(self.manifest.text()),Path(self.source.text() or self.manifest.text()).parent if not self.source.text() else Path(self.source.text()),Path(self.storage.text()).expanduser(),self.gateway.text().strip(),self.target.currentData(),not self.skip.isChecked())
-            self.start.setEnabled(False); self.log.clear(); self.bar.setValue(0); self.status.setText('Building a NEW isolated database…')
-            self.worker=Worker(args); self.worker.message.connect(self.message); self.worker.progress.connect(lambda n,t:(self.bar.setMaximum(t),self.bar.setValue(n))); self.worker.result.connect(self.ready); self.worker.failed.connect(self.failed); self.worker.finished.connect(lambda:self.start.setEnabled(True)); self.phase='Preparing build'; self.phase_started=time.monotonic(); self.timer.start(); self.worker.start()
+            args=(Path(self.manifest.text()),Path(self.source.text() or self.manifest.text()).parent if not self.source.text() else Path(self.source.text()),Path(self.storage.text()).expanduser(),self.gateway.text().strip(),self.target.currentData(),not self.skip.isChecked(),None)
+            self.launch(args)
+        def request_pause(self):
+            if self.worker and self.worker.isRunning():
+                self.worker.pause.set(); self.pause_button.setEnabled(False)
+                self.message('Pause requested · waiting for the next safe checkpoint')
+        def resume_build(self):
+            if self.worker and self.worker.isRunning(): return
+            path=QFileDialog.getOpenFileName(self,'Select paused build result.json',self.storage.text(),'JSON (*.json)')[0]
+            if not path: return
+            try:
+                record=read(Path(path))
+                if record.get('status')!='paused': raise ValueError('Only safely paused builds can resume')
+                c=record['config']
+                args=(Path(c['manifest']),Path(c['source']),Path(path).resolve().parent.parent,c['gateway'],c['end'],c['verify_fingerprints'],Path(path))
+                self.launch(args)
+            except Exception as exc: self.failed(str(exc))
+        def finished(self):
+            self.start.setEnabled(True); self.resume_button.setEnabled(True); self.pause_button.setEnabled(False)
+        def launch(self,args):
+            self.start.setEnabled(False); self.resume_button.setEnabled(False); self.pause_button.setEnabled(True); self.log.clear(); self.bar.setValue(0); self.status.setText('Building a NEW isolated database…')
+            self.worker=Worker(args); self.worker.message.connect(self.message); self.worker.progress.connect(lambda n,t:(self.bar.setMaximum(t),self.bar.setValue(n))); self.worker.result.connect(self.ready); self.worker.failed.connect(self.failed); self.worker.finished.connect(self.finished); self.phase='Preparing build'; self.phase_started=time.monotonic(); self.timer.start(); self.worker.start()
         def closeEvent(self,event):
-            if self.worker and self.worker.isRunning(): QMessageBox.information(self,'Build running','Wait for the build to finish before closing.'); event.ignore()
+            if self.worker and self.worker.isRunning(): QMessageBox.information(self,'Build running','Use Pause safely and wait for confirmation before closing.'); event.ignore()
             else: event.accept()
 
     app=QApplication(sys.argv); window=Window(); window.show(); return app.exec()
