@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Influence World Builder v0.1 — isolated, verified local reconstruction."""
 import argparse
+import gzip
 import hashlib
 import json
 import os
@@ -125,7 +126,8 @@ def run(args, **kwargs):
     return subprocess.run(args, check=True, **kwargs)
 
 
-def build(manifest_path, source, storage, gateway, end, log, progress):
+def build(manifest_path, source, storage, gateway, end, verify_fingerprints, log, progress):
+    started = time.monotonic()
     entries = validate(read(manifest_path))
     if end not in [e['end_block'] for e in entries[1:]]:
         raise ValueError('Select a checkpoint in the manifest')
@@ -152,16 +154,21 @@ def build(manifest_path, source, storage, gateway, end, log, progress):
                 if manifest['source_block'] != entry['end_block']-STEP or manifest['target_block'] != entry['end_block']:
                     raise ValueError('Delta block boundary mismatch')
         files.append(path)
-        progress(i+1, len(entries)*2+1)
+        progress(i+1, len(entries)*2+3)
     name = 'influence-world-'+job.name.removeprefix('build-')
     log(f'Creating isolated MongoDB container {name} — Docker may download the image on first use. Please wait.')
     run(['docker','run','-d','--name',name,'--label','influence.world-builder=0.1',
          '-p','127.0.0.1::27017','-v',name+':/data/db','mongo:7','mongod','--wiredTigerCacheSizeGB','2'], stdout=subprocess.PIPE)
     port = run(['docker','port',name,'27017/tcp'],capture_output=True,text=True).stdout.strip().splitlines()[0].rsplit(':',1)[1]
     uri = 'mongodb://127.0.0.1:'+port
-    info = dict(container=name, volume=name, uri=uri, database=DB, status='incomplete', verified_through=None)
+    info = dict(container=name, volume=name, uri=uri, database=DB, status='incomplete', verified_through=None, applied_through=None, fingerprints_verified=verify_fingerprints,
+                timings={'fingerprints_seconds':0.0,'bulk_writes_seconds':0.0,'application_seconds':0.0})
     def save():
-        tmp = job/'result.tmp'; tmp.write_text(json.dumps(info,indent=2)+'\n'); os.replace(tmp,job/'result.json')
+        tmp = job/'result.tmp'
+        with tmp.open('w') as stream:
+            json.dump(info,stream,indent=2); stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
+        os.replace(tmp,job/'result.json')
+        fd=os.open(job,os.O_RDONLY); os.fsync(fd); os.close(fd)
     save()
     log(f'Build record: {job}/result.json')
     log('Waiting for MongoDB to become ready…')
@@ -172,15 +179,15 @@ def build(manifest_path, source, storage, gateway, end, log, progress):
             except Exception:
                 if attempt == 29: raise
                 time.sleep(1)
-        progress(len(entries)+1,len(entries)*2+1)
+        progress(len(entries)+1,len(entries)*2+3)
         log('Restoring bootstrap — creating collections and indexes…')
         with files[0].open('rb') as stream:
             run(['docker','exec','-i',name,'mongorestore','--archive','--gzip','--stopOnError',
                  '--nsInclude','v12_reconstruction.*','--nsFrom','v12_reconstruction.*','--nsTo',DB+'.*'], stdin=stream)
-        progress(len(entries)+2,len(entries)*2+1)
+        progress(len(entries)+2,len(entries)*2+3)
         db = client.get_database(DB,read_concern=ReadConcern('majority'),write_concern=WriteConcern(w='majority',j=True))
         for i, (entry, path) in enumerate(zip(entries[1:],files[1:]),1):
-            log(f'Applying and verifying through {entry["end_block"]:,}')
+            log(f'Applying{" and verifying" if verify_fingerprints else " (benchmark, no fingerprints)"} through {entry["end_block"]:,}')
             details = []
             for key, label in (('completed_operations','operations'), ('target_documents','target documents')):
                 if isinstance(entry.get(key), int): details.append(f'{entry[key]:,} {label}')
@@ -188,15 +195,45 @@ def build(manifest_path, source, storage, gateway, end, log, progress):
                 details.append(f'previous verified application: {entry["application_seconds"]/60:.1f} min')
             if details: log(' · '.join(details))
             if isinstance(entry.get('comment'), str): log('Checkpoint note: '+entry['comment'])
-            log('Reading, writing and verifying database fingerprints — please wait…')
-            result = apply_package(db,path,job/f'apply-{entry["end_block"]}.json',scratch)
-            if result['status'] != 'applied_checkpoint_verified':
-                raise RuntimeError('Delta verification failed')
-            info['verified_through'] = entry['end_block']; save()
-            progress(len(entries)+2+i,len(entries)*2+1)
-    info['status']='verified'; save()
-    progress(len(entries)*2+1,len(entries)*2+1)
-    log(f'WORLD READY — {uri}/{DB}')
+            log('Reading, writing and verifying database fingerprints — please wait…' if verify_fingerprints else 'Writing delta with package and operation checks only — please wait…')
+            result = apply_package(db,path,job/f'apply-{entry["end_block"]}.json',scratch,verify_fingerprints=verify_fingerprints)
+            expected = 'applied_checkpoint_verified' if verify_fingerprints else 'applied_unverified_benchmark'
+            if result['status'] != expected:
+                raise RuntimeError('Delta application failed')
+            metrics = result['metrics']; timings = info['timings']
+            checks = sum(metrics[k].get('seconds',0) for k in ('starting_checkpoint','final_checkpoint'))
+            writes = metrics['bulk_writes']['seconds']
+            timings['fingerprints_seconds'] += checks; timings['bulk_writes_seconds'] += writes
+            timings['application_seconds'] += result['application_seconds']
+            log(f'Checkpoint: fingerprint scans {checks:.1f} s · bulk writes {writes:.1f} s · total {result["application_seconds"]:.1f} s')
+            info['applied_through'] = entry['end_block']
+            if verify_fingerprints: info['verified_through'] = entry['end_block']
+            save()
+            progress(len(entries)+2+i,len(entries)*2+3)
+    log('Exporting final database as compressed MongoDB archive…')
+    export_started = time.monotonic()
+    archive = job / (f'adalaris-{end}.archive.gz' if verify_fingerprints else f'adalaris-{end}-UNVERIFIED.archive.gz')
+    partial = archive.with_suffix('.gz.part')
+    with partial.open('xb') as stream:
+        run(['docker','exec',name,'mongodump','--db',DB,'--archive','--gzip'],stdout=stream)
+        stream.flush(); os.fsync(stream.fileno())
+    # Check gzip integrity before destroying the live copy; this is not a restore test.
+    with gzip.open(partial,'rb') as stream:
+        if not stream.read(1): raise ValueError('Empty database archive')
+        while stream.read(1024*1024): pass
+    checksum = digest(partial)
+    os.replace(partial,archive)
+    info.update(archive=str(archive),archive_bytes=archive.stat().st_size,archive_sha256=checksum,
+                status='exported_verified' if verify_fingerprints else 'exported_unverified_benchmark',cleanup_complete=False)
+    info['timings']['export_seconds']=time.monotonic()-export_started; save()
+    progress(len(entries)*2+2,len(entries)*2+3)
+    log('Archive saved and gzip checked. Removing temporary MongoDB container and volume…')
+    run(['docker','stop','-t','120',name]); run(['docker','rm','-v',name]); run(['docker','volume','rm',name])
+    shutil.rmtree(cache); shutil.rmtree(scratch)
+    info['cleanup_complete']=True; info['timings']['total_seconds']=time.monotonic()-started; save()
+    progress(len(entries)*2+3,len(entries)*2+3)
+    log('Archive ready — '+str(archive))
+    log(f'Total fingerprint scans: {info["timings"]["fingerprints_seconds"]:.1f} s · bulk writes: {info["timings"]["bulk_writes_seconds"]:.1f} s')
     return info
 
 
@@ -204,7 +241,7 @@ def gui():
     from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer
     from PySide6.QtGui import QPainter, QPixmap, QColor, QLinearGradient
     from PySide6.QtWidgets import (QApplication,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,
-        QLineEdit,QFileDialog,QComboBox,QProgressBar,QPlainTextEdit,QSlider,QMessageBox,QFrame)
+        QLineEdit,QFileDialog,QComboBox,QProgressBar,QPlainTextEdit,QSlider,QMessageBox,QFrame,QCheckBox)
 
     class Worker(QThread):
         message=Signal(str); progress=Signal(int,int); result=Signal(object); failed=Signal(str)
@@ -227,6 +264,7 @@ def gui():
             self.storage=self.field(layout,'Build storage',str(self.settings.value('storage',Path.home()/'.local/share/influence-world-builder')),True)
             layout.addWidget(QLabel('IPFS gateway (optional; HTTPS)')); self.gateway=QLineEdit(str(self.settings.value('gateway','https://ipfs.io'))); layout.addWidget(self.gateway)
             row=QHBoxLayout(); self.target=QComboBox(); row.addWidget(QLabel('Target checkpoint')); row.addWidget(self.target,1); self.load_button=QPushButton('Load manifest'); row.addWidget(self.load_button); layout.addLayout(row); self.load_button.clicked.connect(self.load)
+            self.skip=QCheckBox('Benchmark only — skip database fingerprint scans (UNVERIFIED archive)'); self.skip.setStyleSheet('color:#f7d38b'); layout.addWidget(self.skip)
             self.start=QPushButton('BUILD INFLUENCE WORLD'); self.start.setObjectName('build'); self.start.clicked.connect(self.start_build); layout.addWidget(self.start)
             self.bar=QProgressBar(); self.bar.setValue(0); layout.addWidget(self.bar)
             self.status=QLabel('Ready · select a verified manifest'); self.status.setWordWrap(True); layout.addWidget(self.status)
@@ -269,14 +307,14 @@ def gui():
             self.phase=msg; self.phase_started=time.monotonic(); self.status.setText(msg)
         def ready(self, result):
             self.timer.stop(); self.bar.setValue(self.bar.maximum())
-            self.status.setText('Verified world ready: '+result['uri']+'/'+result['database'])
+            self.status.setText(('Verified archive ready: ' if result['fingerprints_verified'] else 'UNVERIFIED benchmark archive: ')+result['archive'])
         def failed(self, error):
             self.timer.stop(); self.status.setText('Stopped: '+error); self.log.appendPlainText('ERROR: '+error)
         def start_build(self):
             if self.worker and self.worker.isRunning(): return
             if self.target.currentData() is None: self.status.setText('Load a valid manifest first'); return
             for k in ('manifest','source','storage','gateway'): self.settings.setValue(k,getattr(self,k).text())
-            args=(Path(self.manifest.text()),Path(self.source.text() or self.manifest.text()).parent if not self.source.text() else Path(self.source.text()),Path(self.storage.text()).expanduser(),self.gateway.text().strip(),self.target.currentData())
+            args=(Path(self.manifest.text()),Path(self.source.text() or self.manifest.text()).parent if not self.source.text() else Path(self.source.text()),Path(self.storage.text()).expanduser(),self.gateway.text().strip(),self.target.currentData(),not self.skip.isChecked())
             self.start.setEnabled(False); self.log.clear(); self.bar.setValue(0); self.status.setText('Building a NEW isolated database…')
             self.worker=Worker(args); self.worker.message.connect(self.message); self.worker.progress.connect(lambda n,t:(self.bar.setMaximum(t),self.bar.setValue(n))); self.worker.result.connect(self.ready); self.worker.failed.connect(self.failed); self.worker.finished.connect(lambda:self.start.setEnabled(True)); self.phase='Preparing build'; self.phase_started=time.monotonic(); self.timer.start(); self.worker.start()
         def closeEvent(self,event):
