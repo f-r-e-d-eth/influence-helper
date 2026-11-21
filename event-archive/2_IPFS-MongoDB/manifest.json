@@ -1,0 +1,55 @@
+{
+  "format": "influence-v12-world",
+  "version": 1,
+  "bootstrap": {
+    "filename": "v12-bootstrap.archive.gz",
+    "end_block": -1,
+    "bytes": 19506667,
+    "sha256": "59c132dc09f6e63bf9ff278b4ba3ea52fce68275eb7f7a0287bd79bfe584fe15",
+    "cid": "QmSVq8FTASxyxSYqaYZt8pWS4xT8G19VmxBSC7bFhyxoec"
+  },
+  "deltas": [
+    {
+      "filename": "v12-delta-0-99999.tar.gz",
+      "end_block": 99999,
+      "bytes": 5607,
+      "sha256": "fcc07de2031a9a0d0f04b8b2d46881bfa35314d5efe4b0c25dccd503b5e9a589",
+      "cid": "QmSPWjTr3Znr3DNbBhRSs11cq124CS7oSL3XpqM4XBJNMx"
+    },
+    {
+      "filename": "v12-delta-100000-199999.tar.gz",
+      "end_block": 199999,
+      "bytes": 5656,
+      "sha256": "722c19f3cbbddaf3676a4628f6ae72f523b2056924e04fff833d8ffee0900f05",
+      "cid": "QmQo4maR1KoDPuqcBraZaTAwjAe1sRnWEUEJ6oBrWtH7Fu"
+    },
+    {
+      "filename": "v12-delta-200000-299999.tar.gz",
+      "end_block": 299999,
+      "bytes": 1245566,
+      "sha256": "ccdc4ac2da6fec385293d5bc2e92157ff09f330b0966d4c1f4b9f638631d7a7a",
+      "cid": "QmPUsyRbNH4jWUGCbxpmjQ1bnGGFJk9J2ePbWqXLwkurD3"
+    },
+    {
+      "filename": "v12-delta-300000-399999.tar.gz",
+      "end_block": 399999,
+      "bytes": 5623037,
+      "sha256": "0d357838cd4ff8d2d306f3d3242b7348c4a98de63af94ed58a5f0471a01d9145",
+      "cid": "QmWrD1BiqjhSA8M6EiRW26TbMnUY5t6brkY878W4LkUvk2"
+    },
+    {
+      "filename": "v12-delta-400000-499999.tar.gz",
+      "end_block": 499999,
+      "bytes": 2503487,
+      "sha256": "669ddc8dfbf9baac7c69fc3f9b1043186ffa82da489fffea85e173590d636007",
+      "cid": "QmYTF7gRW24cXj7T1GuwbcevUccoMQVkP3TPzNsdH37f1R"
+    },
+    {
+      "filename": "v12-delta-500000-599999.tar.gz",
+      "end_block": 599999,
+      "bytes": 2543194,
+      "sha256": "8df65b8e58f434b0ddf2a7cda922c5c954887bd20cf4d76426f10c05dc092ef5",
+      "cid": "QmRq9hRajQTHThtvSKr5Si5qqEz5xe6DQYJXmo35VmiL5m"
+    }
+  ]
+}
