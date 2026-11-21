@@ -132,6 +132,31 @@ def run(args, **kwargs):
     return subprocess.run(args, check=True, **kwargs)
 
 
+def collection_activity(journal, limit=10):
+    """Rank actual journal counters, not event types or inferred actions."""
+    metrics = journal.get('metrics', {})
+    def ranked(section, key):
+        rows = [(name, value.get(key, 0)) for name, value in
+                metrics.get(section, {}).get('collections', {}).items()
+                if isinstance(value, dict)]
+        return sorted(((name, n) for name, n in rows if type(n) is int and n > 0),
+                      key=lambda item: (-item[1], item[0]))[:limit]
+    return dict(scanned=ranked('final_checkpoint', 'documents_scanned'),
+                writes=ranked('bulk_writes', 'completed_operations'),
+                scans_available=bool(metrics.get('final_checkpoint', {}).get('collections')))
+
+
+def last_activity(job, block):
+    if type(block) is not int or block < 0: return None
+    try:
+        journal = read(job/f'apply-{block}.json')
+        if journal.get('status') not in ('applied_checkpoint_verified', 'applied_unverified_benchmark'):
+            return None
+        return dict(block=block, **collection_activity(journal))
+    except (OSError, ValueError):
+        return None
+
+
 def find_paused(storage):
     candidates = []
     for path in storage.glob('build-*/result.json'):
@@ -237,7 +262,8 @@ def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, 
                    documents=done[-1].get('target_documents') if done else None,
                    current=entry, timings=dict(info['timings']) if info else {},
                    verification=verify_fingerprints, input_bytes=sum(e['bytes'] for e in entries),
-                   archive_bytes=info.get('archive_bytes') if info else None))
+                   archive_bytes=info.get('archive_bytes') if info else None,
+                   activity=last_activity(job,last)))
     # Check every input before creating a database, and check package block boundaries.
     files = []
     for i, entry in enumerate(entries):
@@ -366,7 +392,7 @@ def gui():
     from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer
     from PySide6.QtGui import QPainter, QPixmap, QColor, QLinearGradient
     from PySide6.QtWidgets import (QApplication,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,
-        QProgressBar,QPlainTextEdit,QMessageBox,QFrame,QCheckBox)
+        QProgressBar,QPlainTextEdit,QMessageBox,QFrame,QCheckBox,QGridLayout)
 
     class Worker(QThread):
         message=Signal(str); progress=Signal(int,int); result=Signal(object); failed=Signal(str); stats=Signal(object)
@@ -377,7 +403,7 @@ def gui():
 
     class Window(QWidget):
         def __init__(self):
-            super().__init__(); self.setWindowTitle('Adalaris · Influence World Builder v0.1'); self.resize(940,760)
+            super().__init__(); self.setWindowTitle('Adalaris · Influence World Builder v0.1'); self.resize(1120,900)
             self.settings=QSettings('InfluenceHelper','WorldBuilder'); self.worker=None
             self.image=QPixmap(str(self.settings.value('image',''))); self.opacity=int(self.settings.value('opacity',88))
             outer=QVBoxLayout(self); outer.setContentsMargins(28,28,28,28); outer.setSpacing(16)
@@ -390,6 +416,10 @@ def gui():
             self.bar=QProgressBar(); self.bar.setValue(0); layout.addWidget(self.bar)
             self.status=QLabel('Ready'); self.status.setWordWrap(True); layout.addWidget(self.status)
             self.dashboard=QLabel(); self.dashboard.setWordWrap(True); self.dashboard.setStyleSheet('font-size:15px; padding:12px; color:#d8f3f5'); layout.addWidget(self.dashboard)
+            self.activity_title=QLabel('LAST COMPLETED DELTA · COLLECTION ACTIVITY'); self.activity_title.setStyleSheet('font-size:16px;font-weight:bold;color:#d8f3f5'); layout.addWidget(self.activity_title)
+            charts=QHBoxLayout(); charts.setSpacing(20); layout.addLayout(charts)
+            self.scan_chart=self.make_chart(charts,'Documents scanned · final fingerprint','#67cfbd')
+            self.write_chart=self.make_chart(charts,'Write operations · applied delta','#e0ae69')
             self.log=QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumBlockCount(500); outer.addWidget(self.log,1)
             self.phase_started=time.monotonic(); self.phase=''; self.timer=QTimer(self); self.timer.setInterval(1000); self.timer.timeout.connect(self.tick)
             self.style(); self.refresh_idle()
@@ -411,7 +441,7 @@ def gui():
                     last=record.get('applied_through')
                     self.show_stats(dict(stage='Paused',target=args[4],applied=last,
                         checkpoints=(last+1)//STEP if last is not None else 0,total_checkpoints=(args[4]+1)//STEP,
-                        verification=args[5],timings=record.get('timings',{})))
+                        verification=args[5],timings=record.get('timings',{}),activity=last_activity(args[6].parent,last)))
                 else:
                     self.start.setText('RUN')
                     entries=validate(read(args[0]))
@@ -421,6 +451,43 @@ def gui():
             except Exception as exc:
                 self.start.setText('RUN'); self.start.setEnabled(True); self.skip.setEnabled(True)
                 self.status.setText(str(exc))
+        def make_chart(self, parent, title, color):
+            panel=QFrame(); panel.setStyleSheet('QFrame{background:rgba(16,34,50,180);border-radius:8px}')
+            parent.addWidget(panel,1); column=QVBoxLayout(panel); column.setContentsMargins(10,8,10,8); column.setSpacing(4)
+            heading=QLabel(title); heading.setStyleSheet('font-weight:bold;color:#c9e7ef'); column.addWidget(heading)
+            note=QLabel('No completed delta yet'); note.setStyleSheet('color:#a7bdc8'); column.addWidget(note)
+            grid=QGridLayout(); grid.setHorizontalSpacing(8); grid.setVerticalSpacing(3); grid.setColumnStretch(1,1); column.addLayout(grid)
+            rows=[]
+            for i in range(10):
+                name=QLabel(); name.setTextFormat(Qt.PlainText); name.setStyleSheet('font-size:11px;color:#e2eef4')
+                bar=QProgressBar(); bar.setRange(0,1000); bar.setTextVisible(False); bar.setFixedHeight(9)
+                bar.setStyleSheet('QProgressBar{background:#253747;border:0;border-radius:4px} QProgressBar::chunk{background:'+color+';border-radius:4px}')
+                value=QLabel(); value.setAlignment(Qt.AlignRight); value.setStyleSheet('font-size:11px;color:#e2eef4')
+                for col,widget in enumerate((name,bar,value)): grid.addWidget(widget,i,col); widget.hide()
+                rows.append((name,bar,value))
+            column.addStretch(1)
+            return note,rows
+        def draw_chart(self, chart, values, empty):
+            note,rows=chart
+            note.setText(empty); note.setVisible(not values)
+            maximum=values[0][1] if values else 1
+            for i,(name,bar,value) in enumerate(rows):
+                visible=i<len(values)
+                for widget in (name,bar,value): widget.setVisible(visible)
+                if visible:
+                    label,count=values[i]
+                    name.setText(label.removeprefix('Component_')); name.setToolTip(label)
+                    bar.setValue(max(1,round(1000*count/maximum)))
+                    value.setText(f'{count:,}')
+        def show_activity(self, activity):
+            if not activity:
+                self.activity_title.setText('LAST COMPLETED DELTA · COLLECTION ACTIVITY')
+                self.draw_chart(self.scan_chart,[],'No completed delta yet')
+                self.draw_chart(self.write_chart,[],'No completed delta yet')
+                return
+            self.activity_title.setText(f'LAST COMPLETED DELTA · BLOCK {activity["block"]:,} · TOP 10')
+            self.draw_chart(self.scan_chart,activity['scanned'],'No documents scanned' if activity['scans_available'] else 'Fingerprint scans skipped')
+            self.draw_chart(self.write_chart,activity['writes'],'No write operations')
         def show_stats(self, data):
             def number(n): return f'{n:,}' if type(n) is int and n>=0 else '—'
             def size(n): return f'{n/1024**2:,.1f} MiB' if type(n) is int else '—'
@@ -439,6 +506,7 @@ def gui():
             ]
             self.dashboard.setText('\n'.join(rows))
             self.dashboard.setTextFormat(Qt.PlainText)
+            self.show_activity(data.get('activity'))
         def tick(self):
             if self.worker and self.worker.isRunning():
                 elapsed=int(time.monotonic()-self.phase_started)
