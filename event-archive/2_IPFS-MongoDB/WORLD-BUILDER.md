@@ -14,6 +14,12 @@ python3 -m venv .venv
 
 Select a trusted manifest, local data folder (optional if every file has an IPFS CID), build storage folder and target checkpoint. You can choose an image from your computer and adjust panel opacity; preferences persist locally. The IPFS gateway is optional for local archives. Files are always checked against their manifest size and SHA256 before use. By default, the existing delta engine verifies exact starting and ending database fingerprints for every delta. For timing experiments only, select **Benchmark only — skip database fingerprint scans**. Package integrity, metadata/index and bulk operation-count checks remain enabled; the resulting archive and journals are explicitly marked UNVERIFIED. This proves equality to the published checkpoint fingerprints, not independent blockchain correctness.
 
+## Pause and resume
+
+Click **Pause safely** and wait for PAUSED confirmation. An active delta is completed before MongoDB is cleanly stopped; a request during final export may instead finish the build. You can close the app or shut down the computer after confirmation. Keep the stopped container, its volumes, the build directory, input manifest and delta files. Do not manually start or modify the paused database.
+
+On another day open Adalaris, click **Resume paused build…**, select that build's `result.json`. The unchanged manifest, container identity and completed journals are checked; the original verification mode is retained. Completed checkpoints are skipped. Unexpected termination or an incomplete journal is not treated as a safe pause.
+
 ## Output and timing
 
 Each successful build writes `adalaris-<end>.archive.gz` (or `adalaris-<end>-UNVERIFIED.archive.gz`) inside its unique `build-...` folder in Build storage. This is a native compressed `mongodump --archive` backup, not a continuously running database. The build record includes SHA256, byte size, applied/verified checkpoint, cleanup status and aggregate fingerprint, bulk-write, application, export and total durations. The archive is checked for gzip integrity before cleanup; this is not a restore test. Keep the archive and journals for later restoration. MongoDB images are cached for subsequent builds. If export fails, the temporary database is retained for recovery.
@@ -30,4 +36,4 @@ This validates bootstrap SHA256, every package SHA256 and the matching successfu
 
 ## Scope
 
-Version 0.1 builds a new world, selects historical checkpoints, shows progress and saves settings. Incremental update/resume, signed remote manifest distribution, automatic IPFS publication and AppImage packaging are future work. Do not expose the unauthenticated local MongoDB port to the LAN or internet. For older builds or failures, stop an idle builder container with `docker stop <container name from result.json>`; it can be restarted with `docker start <name>`. This does not remove the world's persistent volume.
+Version 0.1 builds a new world, selects historical checkpoints, shows progress and saves settings. Incremental updates, signed remote manifest distribution, automatic IPFS publication and AppImage packaging are future work. Do not expose the unauthenticated local MongoDB port to the LAN or internet. For older builds or failures, stop an idle builder container with `docker stop <container name from result.json>`; it can be restarted with `docker start <name>`. This does not remove the world's persistent volume.
