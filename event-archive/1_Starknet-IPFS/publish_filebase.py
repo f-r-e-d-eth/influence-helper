@@ -37,13 +37,16 @@ def measure(stream, limit):
 def preflight(root, entries):
     paths = []
     for name, end, size, sha in entries:
-        candidates = list(root.rglob(name))
-        if len(candidates) != 1 or not candidates[0].is_file():
-            raise ValueError(f'Expected exactly one file: {name}; found {len(candidates)}')
+        candidates = sorted(p for p in root.rglob(name) if p.is_file())
+        if not candidates:
+            raise ValueError(f'File not found: {name}')
+        for path in candidates:
+            with path.open('rb') as stream:
+                if measure(stream, size) != (size, sha):
+                    raise ValueError(f'Local SHA-256 or size mismatch: {path}')
         path = candidates[0]
-        with path.open('rb') as stream:
-            if measure(stream, size) != (size, sha):
-                raise ValueError(f'Local SHA-256 or size mismatch: {path}')
+        if len(candidates) > 1:
+            print(f'Identical verified copies: {name} ({len(candidates)}); using {path}', flush=True)
         print(f'Local verified: {name} ({size:,} bytes)', flush=True)
         paths.append(path)
     return paths
