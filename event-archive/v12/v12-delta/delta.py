@@ -355,7 +355,14 @@ def journal_write(path, value, exclusive=False):
         os.close(fd)
 
 
-def apply_package(db, package, journal, scratch, memory_bytes=32*1024*1024, batch_bytes=8*1024*1024, *, verify_fingerprints=True):
+def checkpoint_identity(manifest, side):
+    """Exact checkpoint identity, independent of delta operation counts."""
+    return dict(block=manifest[side+'_block'], metadata=manifest['metadata'],
+                collections={name: (stats[side], stats[side+'_sha256'])
+                             for name, stats in manifest['collections'].items()})
+
+
+def apply_package(db, package, journal, scratch, memory_bytes=32*1024*1024, batch_bytes=8*1024*1024, *, verify_fingerprints=True, previous_verified_checkpoint=None):
     if db.name == ORIGINAL_DB or not db.name.startswith('v12_disposable_'):
         raise ValueError('Application requires a separate database named v12_disposable_*')
     started = time.monotonic()
@@ -367,7 +374,15 @@ def apply_package(db, package, journal, scratch, memory_bytes=32*1024*1024, batc
         if Path(journal).exists():
             raise FileExistsError('Existing application journal; restore a fresh disposable database before retrying')
         if verify_fingerprints:
-            checkpoint(db, manifest, 'source', scratch, memory_bytes, metrics['starting_checkpoint'])
+            if previous_verified_checkpoint is None:
+                checkpoint(db, manifest, 'source', scratch, memory_bytes, metrics['starting_checkpoint'])
+            else:
+                if previous_verified_checkpoint != checkpoint_identity(manifest, 'source'):
+                    raise ValueError('Verified checkpoint continuity mismatch')
+                if metadata(db) != manifest['metadata']:
+                    raise ValueError('Source metadata/index mismatch')
+                metrics['starting_checkpoint'].update(seconds=0.0, documents_scanned=0,
+                                                      collections={}, reused_verified_checkpoint=True)
         elif metadata(db) != manifest['metadata']:
             raise ValueError('Source metadata/index mismatch')
         state = dict(status='applying', database=db.name, package_sha256=sha_file(package), completed_operations=0, metrics=metrics)
@@ -430,6 +445,7 @@ def apply_package(db, package, journal, scratch, memory_bytes=32*1024*1024, batc
                 flush()
             if verify_fingerprints:
                 checkpoint(db, manifest, 'target', scratch, memory_bytes, metrics['final_checkpoint'])
+                state['verified_target_checkpoint'] = checkpoint_identity(manifest, 'target')
             elif metadata(db) != manifest['metadata']:
                 raise ValueError('Target metadata/index mismatch')
             state.update(status='applied_checkpoint_verified' if verify_fingerprints else 'applied_unverified_benchmark',
