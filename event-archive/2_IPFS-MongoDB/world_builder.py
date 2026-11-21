@@ -74,7 +74,14 @@ def make_manifest(data, end, output, cid_file=None):
         journal = read(data / 'verification' / f'apply-{block}.json')
         if journal['status'] != 'applied_checkpoint_verified' or journal['package_sha256'] != report['package_sha256']:
             raise ValueError(f'Delta not verified: {block}')
-        manifest['deltas'].append(entry(path, block, report['package_sha256'], report['compressed_bytes']))
+        item = entry(path, block, report['package_sha256'], report['compressed_bytes'])
+        for key in ('source_documents', 'target_documents', 'generation_seconds'):
+            if key in report:
+                item[key] = report[key]
+        for key in ('completed_operations', 'application_seconds'):
+            if key in journal:
+                item[key] = journal[key]
+        manifest['deltas'].append(item)
     validate(manifest)
     with output.open('x') as stream:
         json.dump(manifest, stream, indent=2)
@@ -147,7 +154,7 @@ def build(manifest_path, source, storage, gateway, end, log, progress):
         files.append(path)
         progress(i+1, len(entries)*2+1)
     name = 'influence-world-'+job.name.removeprefix('build-')
-    log(f'Creating isolated MongoDB container {name}')
+    log(f'Creating isolated MongoDB container {name} — Docker may download the image on first use. Please wait.')
     run(['docker','run','-d','--name',name,'--label','influence.world-builder=0.1',
          '-p','127.0.0.1::27017','-v',name+':/data/db','mongo:7','mongod','--wiredTigerCacheSizeGB','2'], stdout=subprocess.PIPE)
     port = run(['docker','port',name,'27017/tcp'],capture_output=True,text=True).stdout.strip().splitlines()[0].rsplit(':',1)[1]
@@ -157,6 +164,7 @@ def build(manifest_path, source, storage, gateway, end, log, progress):
         tmp = job/'result.tmp'; tmp.write_text(json.dumps(info,indent=2)+'\n'); os.replace(tmp,job/'result.json')
     save()
     log(f'Build record: {job}/result.json')
+    log('Waiting for MongoDB to become ready…')
     with MongoClient(uri,serverSelectionTimeoutMS=2000) as client:
         for attempt in range(30):
             try:
@@ -164,26 +172,36 @@ def build(manifest_path, source, storage, gateway, end, log, progress):
             except Exception:
                 if attempt == 29: raise
                 time.sleep(1)
-        log('Restoring bootstrap')
+        progress(len(entries)+1,len(entries)*2+1)
+        log('Restoring bootstrap — creating collections and indexes…')
         with files[0].open('rb') as stream:
             run(['docker','exec','-i',name,'mongorestore','--archive','--gzip','--stopOnError',
                  '--nsInclude','v12_reconstruction.*','--nsFrom','v12_reconstruction.*','--nsTo',DB+'.*'], stdin=stream)
-        progress(len(entries)+1,len(entries)*2+1)
+        progress(len(entries)+2,len(entries)*2+1)
         db = client.get_database(DB,read_concern=ReadConcern('majority'),write_concern=WriteConcern(w='majority',j=True))
         for i, (entry, path) in enumerate(zip(entries[1:],files[1:]),1):
             log(f'Applying and verifying through {entry["end_block"]:,}')
+            details = []
+            for key, label in (('completed_operations','operations'), ('target_documents','target documents')):
+                if isinstance(entry.get(key), int): details.append(f'{entry[key]:,} {label}')
+            if isinstance(entry.get('application_seconds'), (int,float)):
+                details.append(f'previous verified application: {entry["application_seconds"]/60:.1f} min')
+            if details: log(' · '.join(details))
+            if isinstance(entry.get('comment'), str): log('Checkpoint note: '+entry['comment'])
+            log('Reading, writing and verifying database fingerprints — please wait…')
             result = apply_package(db,path,job/f'apply-{entry["end_block"]}.json',scratch)
             if result['status'] != 'applied_checkpoint_verified':
                 raise RuntimeError('Delta verification failed')
             info['verified_through'] = entry['end_block']; save()
-            progress(len(entries)+1+i,len(entries)*2+1)
+            progress(len(entries)+2+i,len(entries)*2+1)
     info['status']='verified'; save()
+    progress(len(entries)*2+1,len(entries)*2+1)
     log(f'WORLD READY — {uri}/{DB}')
     return info
 
 
 def gui():
-    from PySide6.QtCore import Qt, QThread, Signal, QSettings
+    from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer
     from PySide6.QtGui import QPainter, QPixmap, QColor, QLinearGradient
     from PySide6.QtWidgets import (QApplication,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,
         QLineEdit,QFileDialog,QComboBox,QProgressBar,QPlainTextEdit,QSlider,QMessageBox,QFrame)
@@ -197,11 +215,11 @@ def gui():
 
     class Window(QWidget):
         def __init__(self):
-            super().__init__(); self.setWindowTitle('Influence World Builder · v0.1'); self.resize(940,760)
+            super().__init__(); self.setWindowTitle('Adalaris · Influence World Builder v0.1'); self.resize(940,760)
             self.settings=QSettings('InfluenceHelper','WorldBuilder'); self.worker=None
             self.image=QPixmap(str(self.settings.value('image',''))); self.opacity=int(self.settings.value('opacity',88))
             outer=QVBoxLayout(self); outer.setContentsMargins(28,28,28,28); outer.setSpacing(16)
-            title=QLabel('INFLUENCE  /  WORLD BUILDER'); title.setStyleSheet('font-size: 28px; font-weight: 700; color: #e8f8ff'); outer.addWidget(title)
+            title=QLabel('ADALARIS  /  INFLUENCE WORLD BUILDER'); title.setStyleSheet('font-size: 28px; font-weight: 700; color: #e8f8ff'); outer.addWidget(title)
             sub=QLabel('V0.1  ·  RECONSTRUCT A VERIFIED LOCAL WORLD'); sub.setStyleSheet('color: #9ec7d8; font-size: 13px'); outer.addWidget(sub)
             self.panel=QFrame(); self.panel.setObjectName('panel'); outer.addWidget(self.panel); layout=QVBoxLayout(self.panel); layout.setSpacing(12); layout.setContentsMargins(20,20,20,20)
             self.manifest=self.field(layout,'Manifest JSON',str(self.settings.value('manifest','')),False)
@@ -214,6 +232,7 @@ def gui():
             self.status=QLabel('Ready · select a verified manifest'); self.status.setWordWrap(True); layout.addWidget(self.status)
             self.log=QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumBlockCount(500); outer.addWidget(self.log,1)
             row=QHBoxLayout(); image=QPushButton('Choose background'); image.clicked.connect(self.choose_image); row.addWidget(image); reset=QPushButton('Default background'); reset.clicked.connect(self.reset_image); row.addWidget(reset); row.addWidget(QLabel('Panel opacity')); slider=QSlider(Qt.Horizontal); slider.setRange(55,100); slider.setValue(self.opacity); slider.valueChanged.connect(self.change_opacity); row.addWidget(slider); outer.addLayout(row)
+            self.phase_started=time.monotonic(); self.phase=''; self.timer=QTimer(self); self.timer.setInterval(1000); self.timer.timeout.connect(self.tick)
             self.style(); self.load()
         def field(self,layout,label,value,folder):
             layout.addWidget(QLabel(label)); row=QHBoxLayout(); edit=QLineEdit(value); row.addWidget(edit); button=QPushButton('Browse'); row.addWidget(button); layout.addLayout(row)
@@ -241,13 +260,25 @@ def gui():
                 for e in validate(read(Path(self.manifest.text())))[1:]: self.target.addItem(f'{e["end_block"]:,}',e['end_block'])
                 self.target.setCurrentIndex(self.target.count()-1); self.status.setText('Manifest loaded · choose a target')
             except Exception as exc: self.status.setText(str(exc))
+        def tick(self):
+            if self.worker and self.worker.isRunning():
+                elapsed=int(time.monotonic()-self.phase_started)
+                self.status.setText(f'{self.phase} · elapsed {elapsed//60} min {elapsed%60:02d} s')
+        def message(self, msg):
+            self.log.appendPlainText(msg)
+            self.phase=msg; self.phase_started=time.monotonic(); self.status.setText(msg)
+        def ready(self, result):
+            self.timer.stop(); self.bar.setValue(self.bar.maximum())
+            self.status.setText('Verified world ready: '+result['uri']+'/'+result['database'])
+        def failed(self, error):
+            self.timer.stop(); self.status.setText('Stopped: '+error); self.log.appendPlainText('ERROR: '+error)
         def start_build(self):
             if self.worker and self.worker.isRunning(): return
             if self.target.currentData() is None: self.status.setText('Load a valid manifest first'); return
             for k in ('manifest','source','storage','gateway'): self.settings.setValue(k,getattr(self,k).text())
             args=(Path(self.manifest.text()),Path(self.source.text() or self.manifest.text()).parent if not self.source.text() else Path(self.source.text()),Path(self.storage.text()).expanduser(),self.gateway.text().strip(),self.target.currentData())
             self.start.setEnabled(False); self.log.clear(); self.bar.setValue(0); self.status.setText('Building a NEW isolated database…')
-            self.worker=Worker(args); self.worker.message.connect(self.log.appendPlainText); self.worker.progress.connect(lambda n,t:(self.bar.setMaximum(t),self.bar.setValue(n))); self.worker.result.connect(lambda r:self.status.setText('Verified world ready: '+r['uri']+'/'+r['database'])); self.worker.failed.connect(lambda e:(self.status.setText('Stopped: '+e),self.log.appendPlainText('ERROR: '+e))); self.worker.finished.connect(lambda:self.start.setEnabled(True)); self.worker.start()
+            self.worker=Worker(args); self.worker.message.connect(self.message); self.worker.progress.connect(lambda n,t:(self.bar.setMaximum(t),self.bar.setValue(n))); self.worker.result.connect(self.ready); self.worker.failed.connect(self.failed); self.worker.finished.connect(lambda:self.start.setEnabled(True)); self.phase='Preparing build'; self.phase_started=time.monotonic(); self.timer.start(); self.worker.start()
         def closeEvent(self,event):
             if self.worker and self.worker.isRunning(): QMessageBox.information(self,'Build running','Wait for the build to finish before closing.'); event.ignore()
             else: event.accept()
