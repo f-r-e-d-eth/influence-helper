@@ -23,6 +23,7 @@ DB = 'v12_disposable_world_builder'
 APP_HOME = Path.home() / 'Adalaris'
 DATA = APP_HOME / 'data'
 WORLDS = APP_HOME / 'worlds'
+BACKGROUNDS = APP_HOME / 'backgrounds'
 GATEWAY = 'https://ipfs.io'
 
 
@@ -155,6 +156,13 @@ def last_activity(job, block):
         return dict(block=block, **collection_activity(journal))
     except (OSError, ValueError):
         return None
+
+
+def background_files(folder):
+    """Stable alphabetical rotation of supported image files."""
+    return sorted((p for p in folder.iterdir()
+                   if p.is_file() and p.suffix.lower() in ('.png','.jpg','.jpeg','.webp','.bmp')),
+                  key=lambda p: (p.name.casefold(), p.name))
 
 
 def find_paused(storage):
@@ -420,7 +428,8 @@ def gui():
         def __init__(self):
             super().__init__(); self.setWindowTitle('Adalaris · Influence World Builder v0.1'); self.resize(1120,900)
             self.settings=QSettings('InfluenceHelper','WorldBuilder'); self.worker=None
-            self.image=QPixmap(str(self.settings.value('image',''))); self.opacity=int(self.settings.value('opacity',88))
+            self.image=QPixmap(); self.background_index=None; self.opacity=int(self.settings.value('opacity',88))
+            self.set_background(0)
             outer=QVBoxLayout(self); outer.setContentsMargins(28,28,28,28); outer.setSpacing(16)
             title=QLabel('ADALARIS  /  INFLUENCE WORLD BUILDER'); title.setStyleSheet('font-size: 28px; font-weight: 700; color: #e8f8ff'); outer.addWidget(title)
             sub=QLabel('V0.1  ·  RECONSTRUCT A VERIFIED LOCAL WORLD'); sub.setStyleSheet('color: #9ec7d8; font-size: 13px'); outer.addWidget(sub)
@@ -438,6 +447,19 @@ def gui():
             self.log=QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumBlockCount(500); outer.addWidget(self.log,1)
             self.phase_started=time.monotonic(); self.phase=''; self.timer=QTimer(self); self.timer.setInterval(1000); self.timer.timeout.connect(self.tick)
             self.style(); self.refresh_idle()
+        def set_background(self, completed):
+            if self.background_index == completed: return
+            self.background_index=completed
+            try:
+                BACKGROUNDS.mkdir(parents=True,exist_ok=True)
+                paths=background_files(BACKGROUNDS)
+            except OSError:
+                paths=[]
+            for offset in range(len(paths)):
+                pix=QPixmap(str(paths[(completed+offset)%len(paths)]))
+                if not pix.isNull():
+                    self.image=pix; self.update(); return
+            self.image=QPixmap(); self.update()
         def style(self):
             self.setStyleSheet('QLabel{color:#e1edf5} QFrame#panel{background-color:rgba(12,25,42,'+str(self.opacity*255//100)+');border:1px solid #405568;border-radius:14px} QLineEdit,QComboBox,QPlainTextEdit{background:#111f32;color:#edf6ff;border:1px solid #496179;border-radius:6px;padding:8px} QPushButton{background:#233e56;color:#edf6ff;border:1px solid #52748b;border-radius:7px;padding:9px} QPushButton#build{background:#176b61;font-weight:bold;padding:14px} QPushButton:disabled{color:#8294a5;background:#253342} QProgressBar{color:white;background:#18283a;border-radius:5px;text-align:center} QProgressBar::chunk{background:#258c7e;border-radius:5px}')
         def paintEvent(self,event):
@@ -504,6 +526,7 @@ def gui():
             self.draw_chart(self.scan_chart,activity['scanned'],'No documents scanned' if activity['scans_available'] else 'Fingerprint scans skipped')
             self.draw_chart(self.write_chart,activity['writes'],'No write operations')
         def show_stats(self, data):
+            self.set_background(data.get('checkpoints',0))
             def number(n): return f'{n:,}' if type(n) is int and n>=0 else '—'
             def size(n): return f'{n/1024**2:,.1f} MiB' if type(n) is int else '—'
             def duration(n):
@@ -553,6 +576,7 @@ def gui():
             self.skip.setEnabled(not paused)
             if paused: self.skip.setChecked(not paused[1]['config']['verify_fingerprints'])
         def launch(self,args):
+            self.background_index=None
             self.start.setText('PAUSE'); self.start.setEnabled(True); self.skip.setEnabled(False)
             self.log.clear(); self.bar.setValue(0); self.status.setText('Resuming build…' if args[6] else 'Building a new isolated database…')
             self.worker=Worker(args); self.worker.message.connect(self.message); self.worker.progress.connect(lambda n,t:(self.bar.setMaximum(t),self.bar.setValue(n))); self.worker.stats.connect(self.show_stats); self.worker.result.connect(self.ready); self.worker.failed.connect(self.failed); self.worker.finished.connect(self.finished); self.phase='Preparing build'; self.phase_started=time.monotonic(); self.timer.start(); self.worker.start()
