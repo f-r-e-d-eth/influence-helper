@@ -1,0 +1,8 @@
+{
+  "v12-delta-0-99999.tar.gz": {"bytes": 5607, "cid": "bafkreih4yb66eay2tigq6bfywlkgran7unjrjvpp4symexom2ub3l2nfre"},
+  "v12-delta-100000-199999.tar.gz": {"bytes": 5656, "cid": "bafkreidsfqm7hs553lzwo2sgfd3k44xveozak2je4bh77az5r77obeapau"},
+  "v12-delta-200000-299999.tar.gz": {"bytes": 1245824, "cid": "bafybeicrppouqtycdcc2u5itfif6pnrplbjnvn3i5lcfhzsxal7n5cgfje"},
+  "v12-delta-300000-399999.tar.gz": {"bytes": 5624146, "cid": "bafybeibssbulozygedfuif2huq7rx637qf7kppqmra7konn6va5zwidaja"},
+  "v12-delta-400000-499999.tar.gz": {"bytes": 2503996, "cid": "bafybeidl5xxwxrbzy2tb3q7jzzuek6ib7g2lrhu3fmh5zjuar67mpvemte"},
+  "v12-delta-500000-599999.tar.gz": {"bytes": 2543703, "cid": "bafybeiays3m7xxhxqa565pdwgfqmgyepg226tuzaalsomotzglhv37coum"}
+}
