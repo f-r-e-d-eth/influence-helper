@@ -12,7 +12,8 @@ APP_HOME = Path.home() / 'Adalaris'
 DATA = APP_HOME / 'data'
 WORLDS = APP_HOME / 'worlds'
 BACKGROUNDS = APP_HOME / 'backgrounds'
-GATEWAY = 'https://ipfs.io'
+GATEWAY = 'https://ipfs.filebase.io'
+MANIFEST_URL = 'https://raw.githubusercontent.com/f-r-e-d-eth/influence-helper/main/event-archive/2_IPFS-MongoDB/manifest.json'
 
 
 def collection_activity(journal, limit=10):
@@ -75,9 +76,7 @@ def automatic_args(storage, verify_fingerprints):
         return (None, DATA, storage, GATEWAY, None, verify_fingerprints, None)
     manifest = DATA / 'manifest.json'
     if not manifest.is_file():
-        manifest = ROOT / 'manifest.json'
-    if not manifest.is_file():
-        raise ValueError(f'No published manifest installed. Expected {DATA}/manifest.json')
+        return (None, DATA, storage, GATEWAY, None, verify_fingerprints, None)
     end = validate(read(manifest))[-1]['end_block']
     return (manifest, DATA, storage, GATEWAY, end, verify_fingerprints, None)
 
@@ -96,7 +95,7 @@ def build(manifest_path, source, storage, gateway, end, verify_fingerprints, log
         if resume is None:
             pinned = job/'manifest.json'
             with pinned.open('xb') as stream:
-                raw = manifest_path.read_bytes() if manifest_path is not None else fetch_manifest(os.environ['ADALARIS_MANIFEST_URL'])
+                raw = manifest_path.read_bytes() if manifest_path is not None else fetch_manifest(os.environ.get('ADALARIS_MANIFEST_URL') or MANIFEST_URL)
                 stream.write(raw); stream.flush(); os.fsync(stream.fileno())
             if end is None: end=validate(json.loads(raw))[-1]['end_block']
             manifest_path = pinned
