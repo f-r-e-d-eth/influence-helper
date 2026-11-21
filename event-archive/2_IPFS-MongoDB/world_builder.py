@@ -415,7 +415,7 @@ def gui():
     from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer
     from PySide6.QtGui import QPainter, QPixmap, QColor, QLinearGradient
     from PySide6.QtWidgets import (QApplication,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,
-        QProgressBar,QPlainTextEdit,QMessageBox,QFrame,QCheckBox,QGridLayout)
+        QProgressBar,QPlainTextEdit,QMessageBox,QFrame,QCheckBox,QGridLayout,QSlider)
 
     class Worker(QThread):
         message=Signal(str); progress=Signal(int,int); result=Signal(object); failed=Signal(str); stats=Signal(object)
@@ -428,7 +428,7 @@ def gui():
         def __init__(self):
             super().__init__(); self.setWindowTitle('Adalaris · Influence World Builder v0.1'); self.resize(1120,900)
             self.settings=QSettings('InfluenceHelper','WorldBuilder'); self.worker=None
-            self.image=QPixmap(); self.background_index=None; self.opacity=int(self.settings.value('opacity',88))
+            self.image=QPixmap(); self.background_index=None; self.opacity=max(0,min(100,int(self.settings.value('opacity',88))))
             self.set_background(0)
             outer=QVBoxLayout(self); outer.setContentsMargins(28,28,28,28); outer.setSpacing(16)
             title=QLabel('ADALARIS  /  INFLUENCE WORLD BUILDER'); title.setStyleSheet('font-size: 28px; font-weight: 700; color: #e8f8ff'); outer.addWidget(title)
@@ -445,6 +445,11 @@ def gui():
             self.scan_chart=self.make_chart(charts,'Documents scanned · final fingerprint','#67cfbd')
             self.write_chart=self.make_chart(charts,'Write operations · applied delta','#e0ae69')
             self.log=QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumBlockCount(500); outer.addWidget(self.log,1)
+            controls=QHBoxLayout(); controls.addWidget(QLabel('Panel opacity'))
+            self.opacity_slider=QSlider(Qt.Horizontal); self.opacity_slider.setRange(0,100); self.opacity_slider.setValue(self.opacity)
+            self.opacity_slider.setMaximumWidth(260); controls.addWidget(self.opacity_slider)
+            self.opacity_value=QLabel(f'{self.opacity}%'); controls.addWidget(self.opacity_value); controls.addStretch(1); outer.addLayout(controls)
+            self.opacity_slider.valueChanged.connect(self.change_opacity)
             self.phase_started=time.monotonic(); self.phase=''; self.timer=QTimer(self); self.timer.setInterval(1000); self.timer.timeout.connect(self.tick)
             self.style(); self.refresh_idle()
         def set_background(self, completed):
@@ -460,8 +465,10 @@ def gui():
                 if not pix.isNull():
                     self.image=pix; self.update(); return
             self.image=QPixmap(); self.update()
+        def change_opacity(self,value):
+            self.opacity=value; self.settings.setValue('opacity',value); self.opacity_value.setText(f'{value}%'); self.style(); self.update()
         def style(self):
-            self.setStyleSheet('QLabel{color:#e1edf5} QFrame#panel{background-color:rgba(12,25,42,'+str(self.opacity*255//100)+');border:1px solid #405568;border-radius:14px} QLineEdit,QComboBox,QPlainTextEdit{background:#111f32;color:#edf6ff;border:1px solid #496179;border-radius:6px;padding:8px} QPushButton{background:#233e56;color:#edf6ff;border:1px solid #52748b;border-radius:7px;padding:9px} QPushButton#build{background:#176b61;font-weight:bold;padding:14px} QPushButton:disabled{color:#8294a5;background:#253342} QProgressBar{color:white;background:#18283a;border-radius:5px;text-align:center} QProgressBar::chunk{background:#258c7e;border-radius:5px}')
+            self.setStyleSheet('QLabel{color:#e1edf5} QFrame#panel{background-color:rgba(12,25,42,'+str(self.opacity*255//100)+');border:1px solid #405568;border-radius:14px} QPlainTextEdit{background:rgba(17,31,50,'+str(self.opacity*255//100)+');color:#edf6ff;border:1px solid #496179;border-radius:6px;padding:8px} QFrame#activityChart{background:rgba(16,34,50,'+str(self.opacity*180//100)+');border-radius:8px} QPushButton{background:#233e56;color:#edf6ff;border:1px solid #52748b;border-radius:7px;padding:9px} QPushButton#build{background:#176b61;font-weight:bold;padding:14px} QPushButton:disabled{color:#8294a5;background:#253342} QProgressBar{color:white;background:#18283a;border-radius:5px;text-align:center} QProgressBar::chunk{background:#258c7e;border-radius:5px}')
         def paintEvent(self,event):
             painter=QPainter(self); g=QLinearGradient(0,0,self.width(),self.height()); g.setColorAt(0,QColor('#153c50')); g.setColorAt(1,QColor('#100f29')); painter.fillRect(self.rect(),g)
             if not self.image.isNull():
@@ -489,7 +496,7 @@ def gui():
                 self.start.setText('RUN'); self.start.setEnabled(True); self.skip.setEnabled(True)
                 self.status.setText(str(exc))
         def make_chart(self, parent, title, color):
-            panel=QFrame(); panel.setStyleSheet('QFrame{background:rgba(16,34,50,180);border-radius:8px}')
+            panel=QFrame(); panel.setObjectName('activityChart')
             parent.addWidget(panel,1); column=QVBoxLayout(panel); column.setContentsMargins(10,8,10,8); column.setSpacing(4)
             heading=QLabel(title); heading.setStyleSheet('font-weight:bold;color:#c9e7ef'); column.addWidget(heading)
             note=QLabel('No completed delta yet'); note.setStyleSheet('color:#a7bdc8'); column.addWidget(note)
