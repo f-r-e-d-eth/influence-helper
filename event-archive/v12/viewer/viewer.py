@@ -58,6 +58,23 @@ def collect(root, target=None):
             else:
                 row.update(status=report.get('status'), application=report.get('application_seconds'),
                            operations=report.get('completed_operations'))
+    # Cumulative generated delta bytes from the bootstrap (-1).
+    # A missing report makes the cumulative total unknown, not zero.
+    cumulative = 0
+    expected = INTERVAL - 1
+    for end, row in sorted(rows.items()):
+        delta = row.get('delta_bytes')
+        if end != expected or type(delta) is not int or delta < 0:
+            cumulative = None
+        elif cumulative is not None:
+            cumulative += delta
+        row['cumulative_delta_bytes'] = cumulative
+        archive = row.get('archive_bytes')
+        row['publication_ratio'] = (
+            cumulative / archive if cumulative is not None
+            and type(archive) is int and archive > 0 else None
+        )
+        expected = end + INTERVAL
     verified = -1
     while rows.get(verified + INTERVAL, {}).get('status') == 'applied_checkpoint_verified':
         verified += INTERVAL
@@ -86,7 +103,7 @@ PAGE = r'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name
 </style></head><body><div id="back"></div><main><header><div><h1>INFLUENCE · V12 Observer</h1><small>MAINNET RECONSTRUCTION / READ-ONLY</small></div><div class="settings"><select id="theme" aria-label="Background"><option value="nebula">Nebula</option><option value="ocean">Ocean</option><option value="ember">Ember</option><option value="plain">Midnight</option><option value="custom">My image</option></select><label class="pick">Choose image<input id="image" type="file" accept="image/*" hidden></label><label>Panel opacity <input id="opacity" type="range" min="55" max="100" value="88"></label></div></header>
 <div class="grid"><div class="panel"><small>RECONSTRUCTED THROUGH</small><div class="number" id="completed">—</div><div class="track"><div class="fill" id="p1"></div></div><small id="producer">Waiting for reports</small></div><div class="panel"><small>VERIFIED THROUGH</small><div class="number" id="verified">—</div><div class="track"><div class="fill" id="p2"></div></div><small id="lag">—</small></div><div class="panel"><small>FREE DISK SPACE</small><div class="number" id="free">—</div><small id="target">—</small></div><div class="panel"><small>RETAINED ARCHIVES</small><div class="number" id="size">—</div><small id="breakdown">—</small></div></div>
 <div id="message" role="status" class="muted"></div><div class="panel section"><h2>Processing duration · latest 12 checkpoints</h2><div class="legend"><span style="color:#70b6ff">■ Retrieve</span><span style="color:#69e6cd">■ Drain</span><span style="color:#e5b4ff">■ Delta</span><span style="color:#ffc17e">■ Apply + verify</span></div><div id="bars"></div></div>
-<div class="panel section"><h2>Checkpoint history</h2><div class="scroll"><table><thead><tr><th>Block</th><th>Status</th><th>Retrieve</th><th>Drain</th><th>Delta</th><th>Apply + verify</th><th>Snapshot</th><th>Delta size</th><th>Operations</th></tr></thead><tbody id="history"></tbody></table></div></div></main>
+<div class="panel section"><h2>Archive and delta growth</h2><small>Cumulative generated deltas since bootstrap (not reset at publication). Missing reports leave gaps.</small><div class="legend"><span style="color:#70b6ff">■ Full archive</span><span style="color:#69e6cd">■ Cumulative deltas</span><span style="color:#e5b4ff">■ Individual delta</span></div><div id="growth"></div><small id="ratio"></small></div><div class="panel section"><h2>Checkpoint history</h2><div class="scroll"><table><thead><tr><th>Block</th><th>Status</th><th>Retrieve</th><th>Drain</th><th>Delta</th><th>Apply + verify</th><th>Snapshot</th><th>Delta size</th><th>Cumulative deltas</th><th>Delta / archive</th><th>Operations</th></tr></thead><tbody id="history"></tbody></table></div></div></main>
 <script>
 const $=id=>document.getElementById(id), fmt=n=>typeof n==='number'?n.toLocaleString('en-US'):'—', secs=n=>{if(typeof n!=='number'||!Number.isFinite(n)||n<0)return '—';if(n<60)return n.toFixed(1)+' s';const t=Math.round(n),h=Math.floor(t/3600),m=Math.floor(t%3600/60),s=t%60;return h?h+' h '+m+' min':m+' min '+s+' s'};
 function bytes(n){if(typeof n!=='number')return '—';for(const [d,u] of [[2**40,'TiB'],[2**30,'GiB'],[2**20,'MiB'],[1024,'KiB']])if(n>=d)return (n/d).toFixed(1)+' '+u;return n+' B'}
@@ -95,8 +112,26 @@ const themes={nebula:'radial-gradient(ellipse at 75% 15%,#264b65,transparent 60%
 function appearance(){let t=$('theme').value;let img=get('v12-image','');$('back').style.background=t==='custom'&&img?'url("'+img+'") center/cover no-repeat':themes[t]||themes.nebula;document.documentElement.style.setProperty('--panel',`rgba(12,22,36,${$('opacity').value/100})`);put('v12-theme',t);put('v12-opacity',$('opacity').value)}
 $('theme').value=get('v12-theme','nebula');$('opacity').value=get('v12-opacity','88');$('theme').onchange=appearance;$('opacity').oninput=appearance;appearance();
 $('image').onchange=()=>{let f=$('image').files[0];if(!f)return;let url=URL.createObjectURL(f),im=new Image();im.onload=()=>{let c=document.createElement('canvas'),scale=Math.min(1,1920/Math.max(im.width,im.height));c.width=Math.max(1,Math.round(im.width*scale));c.height=Math.max(1,Math.round(im.height*scale));c.getContext('2d').drawImage(im,0,0,c.width,c.height);URL.revokeObjectURL(url);if(!put('v12-image',c.toDataURL('image/jpeg',.8))){alert('Could not save image in browser storage');return}$('theme').value='custom';appearance()};im.onerror=()=>{URL.revokeObjectURL(url);alert('Unable to open image')};im.src=url};
-function render(d){$('completed').textContent=fmt(d.completed);$('verified').textContent=fmt(d.verified);$('producer').textContent=d.producer_status;$('lag').textContent=d.completed===null?'Waiting for producer':fmt(Math.max(0,d.completed-d.verified))+' blocks behind';$('free').textContent=bytes(d.free);$('size').textContent=bytes(d.snapshots+d.deltas);$('breakdown').textContent=bytes(d.snapshots)+' snapshots · '+bytes(d.deltas)+' deltas';$('target').textContent=d.target===null?'Target not specified':'Target: '+fmt(d.target);for(const [id,n] of [['p1',d.completed],['p2',d.verified]])$(id).style.width=d.target!==null&&n!==null?Math.max(0,Math.min(100,100*(n+1)/(d.target+1)))+'%':'0%';
-$('history').replaceChildren();for(const r of d.rows){let tr=document.createElement('tr'),verified=r.status==='applied_checkpoint_verified',status=verified?'Verified':r.status==='failed_restore_required'?'Failed':r.status==='applying'?'Applying':r.delta?'Delta ready':'Snapshot ready';for(const [i,value] of [fmt(r.end),status,secs(r.retrieve),secs(r.drain),secs(r.generation),secs(r.application),r.snapshot?(r.snapshot_present?bytes(r.archive_bytes):'Removed'):'—',bytes(r.delta_bytes),fmt(r.operations)].entries()){let td=document.createElement('td');td.textContent=value;if(i===1)td.className=verified?'good':status==='Failed'?'bad':'warn';tr.append(td)}$('history').append(tr)}
+function percent(n){return typeof n==='number'&&Number.isFinite(n)?(100*n).toFixed(1)+'%':'—'}
+function growth(rows){
+  const host=$('growth');host.replaceChildren();
+  const data=rows.slice().reverse(),series=[['archive_bytes','#70b6ff','Full archive'],['cumulative_delta_bytes','#69e6cd','Cumulative deltas'],['delta_bytes','#e5b4ff','Individual delta']];
+  const valid=n=>typeof n==='number'&&Number.isFinite(n)&&n>=0;
+  const latest=data[data.length-1];
+  $('ratio').textContent=latest?'Cumulative / full archive at '+fmt(latest.end)+': '+percent(latest.publication_ratio):'No checkpoint reports yet';
+  if(!data.length){host.textContent='Waiting for reports';return}
+  const W=1000,H=290,L=78,R=30,T=15,B=45;
+  const max=Math.max(1,...data.flatMap(r=>series.map(([k])=>valid(r[k])?r[k]:0)));
+  const first=data[0].end,last=latest.end,x=end=>L+(W-L-R)*(last===first?.5:(end-first)/(last-first)),y=n=>H-B-(H-T-B)*n/max;
+  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 '+W+' '+H);svg.setAttribute('width','100%');svg.setAttribute('role','img');svg.setAttribute('aria-label','Full archive and delta sizes by checkpoint');
+  function add(tag,attrs,label,parent=svg){const el=document.createElementNS(svg.namespaceURI,tag);for(const [k,v] of Object.entries(attrs))el.setAttribute(k,v);if(label!==undefined)el.textContent=label;parent.append(el);return el}
+  for(let i=0;i<=4;i++){const n=max*i/4;add('line',{x1:L,x2:W-R,y1:y(n),y2:y(n),stroke:'#ffffff26'});add('text',{x:L-8,y:y(n)+4,fill:'#aabbd0','font-size':12,'text-anchor':'end'},bytes(Math.round(n)))}
+  const step=Math.max(1,Math.ceil(data.length/8));data.forEach((r,i)=>{if(i%step===0||i===data.length-1)add('text',{x:x(r.end),y:H-B+20,fill:'#aabbd0','font-size':11,'text-anchor':'middle'},fmt(r.end))});
+  for(const [key,color,label] of series){let previous=null;for(const r of data){const n=r[key];if(!valid(n)){previous=null;continue}if(previous&&r.end===previous.end+100000)add('line',{x1:x(previous.end),y1:y(previous[key]),x2:x(r.end),y2:y(n),stroke:color,'stroke-width':2.5});const dot=add('circle',{cx:x(r.end),cy:y(n),r:4,fill:color});add('title',{},fmt(r.end)+' · '+label+': '+bytes(n),dot);previous=r}}
+  host.append(svg);
+}
+function render(d){growth(d.rows);$('completed').textContent=fmt(d.completed);$('verified').textContent=fmt(d.verified);$('producer').textContent=d.producer_status;$('lag').textContent=d.completed===null?'Waiting for producer':fmt(Math.max(0,d.completed-d.verified))+' blocks behind';$('free').textContent=bytes(d.free);$('size').textContent=bytes(d.snapshots+d.deltas);$('breakdown').textContent=bytes(d.snapshots)+' snapshots · '+bytes(d.deltas)+' deltas';$('target').textContent=d.target===null?'Target not specified':'Target: '+fmt(d.target);for(const [id,n] of [['p1',d.completed],['p2',d.verified]])$(id).style.width=d.target!==null&&n!==null?Math.max(0,Math.min(100,100*(n+1)/(d.target+1)))+'%':'0%';
+$('history').replaceChildren();for(const r of d.rows){let tr=document.createElement('tr'),verified=r.status==='applied_checkpoint_verified',status=verified?'Verified':r.status==='failed_restore_required'?'Failed':r.status==='applying'?'Applying':r.delta?'Delta ready':'Snapshot ready';for(const [i,value] of [fmt(r.end),status,secs(r.retrieve),secs(r.drain),secs(r.generation),secs(r.application),r.snapshot?bytes(r.archive_bytes)+(r.snapshot_present?'':' (Removed)'):'—',bytes(r.delta_bytes),bytes(r.cumulative_delta_bytes),percent(r.publication_ratio),fmt(r.operations)].entries()){let td=document.createElement('td');td.textContent=value;if(i===1)td.className=verified?'good':status==='Failed'?'bad':'warn';tr.append(td)}$('history').append(tr)}
 const keys=['retrieve','drain','generation','application'],colors=['#70b6ff','#69e6cd','#e5b4ff','#ffc17e'],recent=d.rows.slice(0,12).reverse(),total=r=>keys.reduce((s,k)=>s+(typeof r[k]==='number'?r[k]:0),0),max=Math.max(1,...recent.map(total));$('bars').replaceChildren();for(const r of recent){const line=document.createElement('div'),label=document.createElement('span'),bar=document.createElement('div'),value=document.createElement('span');line.className='barrow';bar.className='bar';label.textContent=fmt(r.end);value.textContent=secs(total(r));keys.forEach((k,i)=>{let seg=document.createElement('i');seg.style.width=(100*(r[k]||0)/max)+'%';seg.style.background=colors[i];seg.title=k+': '+secs(r[k]);bar.append(seg)});line.append(label,bar,value);$('bars').append(line)}$('message').textContent='Reports read at '+new Date(d.refreshed).toLocaleTimeString('en-GB')+' · refresh every 10 s · worker liveness not inferred';}
 async function refresh(){try{let r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);render(await r.json())}catch(e){$('message').textContent='Refresh failed; displayed values may be stale: '+e.message}finally{setTimeout(refresh,10000)}}refresh();
 </script></body></html>'''
