@@ -20,6 +20,10 @@ ROOT = Path(__file__).resolve().parent
 ENGINE = ROOT.parent / 'v12' / 'v12-delta'
 STEP = 100_000
 DB = 'v12_disposable_world_builder'
+APP_HOME = Path.home() / 'Adalaris'
+DATA = APP_HOME / 'data'
+WORLDS = APP_HOME / 'worlds'
+GATEWAY = 'https://ipfs.io'
 
 
 def digest(path):
@@ -128,7 +132,40 @@ def run(args, **kwargs):
     return subprocess.run(args, check=True, **kwargs)
 
 
-def build(manifest_path, source, storage, gateway, end, verify_fingerprints, log, progress, pause=None, resume=None):
+def find_paused(storage):
+    candidates = []
+    for path in storage.glob('build-*/result.json'):
+        if not re.fullmatch(r'build-[0-9a-f]{12}', path.parent.name):
+            continue
+        try:
+            record = read(path)
+            if record.get('status') == 'paused':
+                candidates.append((path.stat().st_mtime_ns, str(path), path, record))
+        except (OSError, ValueError):
+            continue
+    if not candidates:
+        return None
+    _, _, path, record = min(candidates)
+    return path, record
+
+
+def automatic_args(storage, verify_fingerprints):
+    paused = find_paused(storage)
+    if paused:
+        path, record = paused
+        c = record['config']
+        return (Path(c['manifest']), Path(c['source']), storage, c['gateway'],
+                c['end'], c['verify_fingerprints'], path)
+    manifest = DATA / 'manifest.json'
+    if not manifest.is_file():
+        manifest = ROOT / 'manifest.json'
+    if not manifest.is_file():
+        raise ValueError(f'No published manifest installed. Expected {DATA}/manifest.json')
+    end = validate(read(manifest))[-1]['end_block']
+    return (manifest, DATA, storage, GATEWAY, end, verify_fingerprints, None)
+
+
+def build(manifest_path, source, storage, gateway, end, verify_fingerprints, log, progress, pause=None, resume=None, stats=None):
     storage = storage.resolve()
     if resume is None:
         storage.mkdir(parents=True, exist_ok=True)
@@ -139,10 +176,15 @@ def build(manifest_path, source, storage, gateway, end, verify_fingerprints, log
             raise ValueError('Select a paused build result.json')
     with (job/'build.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, progress, pause, resume, job)
+        if resume is None:
+            pinned = job/'manifest.json'
+            with pinned.open('xb') as stream:
+                stream.write(manifest_path.read_bytes()); stream.flush(); os.fsync(stream.fileno())
+            manifest_path = pinned
+        return build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, progress, pause, resume, job, stats)
 
 
-def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, progress, pause, resume, job):
+def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, progress, pause, resume, job, stats=None):
     started = time.monotonic()
     manifest_bytes = manifest_path.read_bytes()
     entries = validate(json.loads(manifest_bytes))
@@ -184,9 +226,22 @@ def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, 
             raise ValueError('Paused container missing, changed, or not cleanly stopped')
     cache = job / 'downloads'; cache.mkdir(exist_ok=True)
     scratch = job / 'scratch'; scratch.mkdir(exist_ok=True)
+    def report(stage, entry=None):
+        if not stats: return
+        entry = entry or {}
+        last = info.get('applied_through') if info else None
+        done = [e for e in entries[1:] if last is not None and e['end_block'] <= last]
+        ops = [e.get('completed_operations') for e in done]
+        stats(dict(stage=stage, target=end, applied=last, checkpoints=len(done), total_checkpoints=len(entries)-1,
+                   operations_done=sum(ops) if all(type(n) is int for n in ops) else None,
+                   documents=done[-1].get('target_documents') if done else None,
+                   current=entry, timings=dict(info['timings']) if info else {},
+                   verification=verify_fingerprints, input_bytes=sum(e['bytes'] for e in entries),
+                   archive_bytes=info.get('archive_bytes') if info else None))
     # Check every input before creating a database, and check package block boundaries.
     files = []
     for i, entry in enumerate(entries):
+        report('Checking input', entry)
         path = acquire(entry, source, cache, gateway, log)
         if i:
             with unpack(path, scratch) as (manifest, _):
@@ -195,6 +250,7 @@ def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, 
         files.append(path)
         progress(i+1, len(entries)*2+3)
     if not resume:
+        report('Preparing MongoDB')
         log(f'Creating isolated MongoDB container {name} — Docker may download the image on first use. Please wait.')
         container_id = run(['docker','run','-d','--name',name,'--label','influence.world-builder=0.1',
              '-p','127.0.0.1::27017','-v',name+':/data/db','mongo:7','mongod','--wiredTigerCacheSizeGB','2'], capture_output=True,text=True).stdout.strip()
@@ -224,6 +280,7 @@ def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, 
         info.update(status='paused',uri=None)
         info['timings']['active_seconds']=info['timings'].get('active_seconds',0)+time.monotonic()-started
         save()
+        report('Paused')
         log(f'PAUSED safely — resume using {job}/result.json')
         return True
     log(f'Build record: {job}/result.json')
@@ -237,6 +294,7 @@ def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, 
                 time.sleep(1)
         progress(len(entries)+1,len(entries)*2+3)
         if not resume:
+            report('Restoring bootstrap', entries[0])
             log('Restoring bootstrap — creating collections and indexes…')
             with files[0].open('rb') as stream:
                 run(['docker','exec','-i',name,'mongorestore','--archive','--gzip','--stopOnError',
@@ -249,6 +307,7 @@ def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, 
                 progress(len(entries)+2+i,len(entries)*2+3)
                 continue
             if pause_at_boundary(): return info
+            report('Applying delta', entry)
             log(f'Applying{" and verifying" if verify_fingerprints else " (benchmark, no fingerprints)"} through {entry["end_block"]:,}')
             details = []
             for key, label in (('completed_operations','operations'), ('target_documents','target documents')):
@@ -271,8 +330,10 @@ def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, 
             info['applied_through'] = entry['end_block']
             if verify_fingerprints: info['verified_through'] = entry['end_block']
             save()
+            report('Checkpoint complete', entry)
             progress(len(entries)+2+i,len(entries)*2+3)
     if pause_at_boundary(): return info
+    report('Exporting database')
     log('Exporting final database as compressed MongoDB archive…')
     export_started = time.monotonic()
     archive = job / (f'adalaris-{end}.archive.gz' if verify_fingerprints else f'adalaris-{end}-UNVERIFIED.archive.gz')
@@ -295,6 +356,7 @@ def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, 
     shutil.rmtree(cache); shutil.rmtree(scratch)
     info['cleanup_complete']=True; info['uri']=None; info['timings']['total_seconds']=info['timings'].get('active_seconds',0)+time.monotonic()-started; save()
     progress(len(entries)*2+3,len(entries)*2+3)
+    report('Complete')
     log('Archive ready — '+str(archive))
     log(f'Total fingerprint scans: {info["timings"]["fingerprints_seconds"]:.1f} s · bulk writes: {info["timings"]["bulk_writes_seconds"]:.1f} s')
     return info
@@ -304,13 +366,13 @@ def gui():
     from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer
     from PySide6.QtGui import QPainter, QPixmap, QColor, QLinearGradient
     from PySide6.QtWidgets import (QApplication,QWidget,QVBoxLayout,QHBoxLayout,QLabel,QPushButton,
-        QLineEdit,QFileDialog,QComboBox,QProgressBar,QPlainTextEdit,QSlider,QMessageBox,QFrame,QCheckBox)
+        QProgressBar,QPlainTextEdit,QMessageBox,QFrame,QCheckBox)
 
     class Worker(QThread):
-        message=Signal(str); progress=Signal(int,int); result=Signal(object); failed=Signal(str)
+        message=Signal(str); progress=Signal(int,int); result=Signal(object); failed=Signal(str); stats=Signal(object)
         def __init__(self,args): super().__init__(); self.args=args; self.pause=threading.Event()
         def run(self):
-            try: self.result.emit(build(*self.args[:6],self.message.emit,self.progress.emit,pause=self.pause,resume=self.args[6]))
+            try: self.result.emit(build(*self.args[:6],self.message.emit,self.progress.emit,pause=self.pause,resume=self.args[6],stats=self.stats.emit))
             except Exception as exc: self.failed.emit(str(exc))
 
     class Window(QWidget):
@@ -322,48 +384,61 @@ def gui():
             title=QLabel('ADALARIS  /  INFLUENCE WORLD BUILDER'); title.setStyleSheet('font-size: 28px; font-weight: 700; color: #e8f8ff'); outer.addWidget(title)
             sub=QLabel('V0.1  ·  RECONSTRUCT A VERIFIED LOCAL WORLD'); sub.setStyleSheet('color: #9ec7d8; font-size: 13px'); outer.addWidget(sub)
             self.panel=QFrame(); self.panel.setObjectName('panel'); outer.addWidget(self.panel); layout=QVBoxLayout(self.panel); layout.setSpacing(12); layout.setContentsMargins(20,20,20,20)
-            self.manifest=self.field(layout,'Manifest JSON',str(self.settings.value('manifest','')),False)
-            self.source=self.field(layout,'Local data folder (optional)',str(self.settings.value('source','')),True)
-            self.storage=self.field(layout,'Build storage',str(self.settings.value('storage',Path.home()/'.local/share/influence-world-builder')),True)
-            layout.addWidget(QLabel('IPFS gateway (optional; HTTPS)')); self.gateway=QLineEdit(str(self.settings.value('gateway','https://ipfs.io'))); layout.addWidget(self.gateway)
-            row=QHBoxLayout(); self.target=QComboBox(); row.addWidget(QLabel('Target checkpoint')); row.addWidget(self.target,1); self.load_button=QPushButton('Load manifest'); row.addWidget(self.load_button); layout.addLayout(row); self.load_button.clicked.connect(self.load)
-            self.skip=QCheckBox('Benchmark only — skip database fingerprint scans (UNVERIFIED archive)'); self.skip.setStyleSheet('color:#f7d38b'); layout.addWidget(self.skip)
-            self.start=QPushButton('BUILD INFLUENCE WORLD'); self.start.setObjectName('build'); self.start.clicked.connect(self.start_build); layout.addWidget(self.start)
-            controls=QHBoxLayout()
-            self.pause_button=QPushButton('Pause safely'); self.pause_button.setEnabled(False); self.pause_button.clicked.connect(self.request_pause); controls.addWidget(self.pause_button)
-            self.resume_button=QPushButton('Resume paused build…'); self.resume_button.clicked.connect(self.resume_build); controls.addWidget(self.resume_button); layout.addLayout(controls)
+            self.storage = WORLDS
+            self.skip=QCheckBox('Benchmark only — skip database fingerprints (UNVERIFIED archive)'); self.skip.setStyleSheet('color:#f7d38b'); layout.addWidget(self.skip)
+            self.start=QPushButton('RUN'); self.start.setObjectName('build'); self.start.clicked.connect(self.action); layout.addWidget(self.start)
             self.bar=QProgressBar(); self.bar.setValue(0); layout.addWidget(self.bar)
-            self.status=QLabel('Ready · select a verified manifest'); self.status.setWordWrap(True); layout.addWidget(self.status)
+            self.status=QLabel('Ready'); self.status.setWordWrap(True); layout.addWidget(self.status)
+            self.dashboard=QLabel(); self.dashboard.setWordWrap(True); self.dashboard.setStyleSheet('font-size:15px; padding:12px; color:#d8f3f5'); layout.addWidget(self.dashboard)
             self.log=QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMaximumBlockCount(500); outer.addWidget(self.log,1)
-            row=QHBoxLayout(); image=QPushButton('Choose background'); image.clicked.connect(self.choose_image); row.addWidget(image); reset=QPushButton('Default background'); reset.clicked.connect(self.reset_image); row.addWidget(reset); row.addWidget(QLabel('Panel opacity')); slider=QSlider(Qt.Horizontal); slider.setRange(55,100); slider.setValue(self.opacity); slider.valueChanged.connect(self.change_opacity); row.addWidget(slider); outer.addLayout(row)
             self.phase_started=time.monotonic(); self.phase=''; self.timer=QTimer(self); self.timer.setInterval(1000); self.timer.timeout.connect(self.tick)
-            self.style(); self.load()
-        def field(self,layout,label,value,folder):
-            layout.addWidget(QLabel(label)); row=QHBoxLayout(); edit=QLineEdit(value); row.addWidget(edit); button=QPushButton('Browse'); row.addWidget(button); layout.addLayout(row)
-            def choose():
-                p=QFileDialog.getExistingDirectory(self,label,edit.text()) if folder else QFileDialog.getOpenFileName(self,label,edit.text(),'JSON (*.json)')[0]
-                if p: edit.setText(p)
-            button.clicked.connect(choose); return edit
+            self.style(); self.refresh_idle()
         def style(self):
             self.setStyleSheet('QLabel{color:#e1edf5} QFrame#panel{background-color:rgba(12,25,42,'+str(self.opacity*255//100)+');border:1px solid #405568;border-radius:14px} QLineEdit,QComboBox,QPlainTextEdit{background:#111f32;color:#edf6ff;border:1px solid #496179;border-radius:6px;padding:8px} QPushButton{background:#233e56;color:#edf6ff;border:1px solid #52748b;border-radius:7px;padding:9px} QPushButton#build{background:#176b61;font-weight:bold;padding:14px} QPushButton:disabled{color:#8294a5;background:#253342} QProgressBar{color:white;background:#18283a;border-radius:5px;text-align:center} QProgressBar::chunk{background:#258c7e;border-radius:5px}')
         def paintEvent(self,event):
             painter=QPainter(self); g=QLinearGradient(0,0,self.width(),self.height()); g.setColorAt(0,QColor('#153c50')); g.setColorAt(1,QColor('#100f29')); painter.fillRect(self.rect(),g)
             if not self.image.isNull():
                 scaled=self.image.scaled(self.size(),Qt.KeepAspectRatioByExpanding,Qt.SmoothTransformation); painter.drawPixmap((self.width()-scaled.width())//2,(self.height()-scaled.height())//2,scaled)
-        def choose_image(self):
-            p=QFileDialog.getOpenFileName(self,'Background','','Images (*.png *.jpg *.jpeg *.webp)')[0]
-            if p:
-                pix=QPixmap(p)
-                if not pix.isNull(): self.image=pix; self.settings.setValue('image',p); self.update()
-        def reset_image(self): self.image=QPixmap(); self.settings.remove('image'); self.update()
-        def change_opacity(self,v): self.opacity=v; self.settings.setValue('opacity',v); self.style()
-        def load(self):
-            self.target.clear()
-            if not self.manifest.text(): return
+        def refresh_idle(self):
             try:
-                for e in validate(read(Path(self.manifest.text())))[1:]: self.target.addItem(f'{e["end_block"]:,}',e['end_block'])
-                self.target.setCurrentIndex(self.target.count()-1); self.status.setText('Manifest loaded · choose a target')
-            except Exception as exc: self.status.setText(str(exc))
+                args=automatic_args(self.storage,not self.skip.isChecked())
+                self.start.setEnabled(True)
+                self.skip.setEnabled(args[6] is None)
+                if args[6]:
+                    record=read(args[6]); self.skip.setChecked(not args[5])
+                    self.start.setText('RESUME')
+                    self.status.setText('Paused build found · ready to resume')
+                    last=record.get('applied_through')
+                    self.show_stats(dict(stage='Paused',target=args[4],applied=last,
+                        checkpoints=(last+1)//STEP if last is not None else 0,total_checkpoints=(args[4]+1)//STEP,
+                        verification=args[5],timings=record.get('timings',{})))
+                else:
+                    self.start.setText('RUN')
+                    entries=validate(read(args[0]))
+                    self.status.setText(f'Ready · {len(entries)-1} available checkpoints')
+                    self.show_stats(dict(stage='Ready',target=args[4],total_checkpoints=len(entries)-1,
+                        checkpoints=0,input_bytes=sum(e['bytes'] for e in entries),verification=args[5]))
+            except Exception as exc:
+                self.start.setText('RUN'); self.start.setEnabled(True); self.skip.setEnabled(True)
+                self.status.setText(str(exc))
+        def show_stats(self, data):
+            def number(n): return f'{n:,}' if type(n) is int and n>=0 else '—'
+            def size(n): return f'{n/1024**2:,.1f} MiB' if type(n) is int else '—'
+            def duration(n):
+                if not isinstance(n,(int,float)): return '—'
+                return f'{int(n)//60} min {int(n)%60:02d} s' if n>=60 else f'{n:.1f} s'
+            e=data.get('current',{}); t=data.get('timings',{})
+            rows=[
+                f"Target block: {number(data.get('target'))}     ·     Completed: {number(data.get('applied'))}",
+                f"Checkpoints: {data.get('checkpoints',0)} / {data.get('total_checkpoints',0)}     ·     {'Verified mode' if data.get('verification') else 'Benchmark mode'}",
+                f"Current file: {e.get('filename','—')}     ·     {size(e.get('bytes'))}",
+                f"Expected target documents: {number(e.get('target_documents'))}     ·     Planned operations: {number(e.get('completed_operations'))}",
+                f"Completed documents (manifest): {number(data.get('documents'))}     ·     Completed operations (manifest): {number(data.get('operations_done'))}",
+                f"Fingerprint time: {duration(t.get('fingerprints_seconds'))}     ·     Write time: {duration(t.get('bulk_writes_seconds'))}",
+                f"Input package size: {size(data.get('input_bytes'))}     ·     Export: {size(data.get('archive_bytes'))}",
+            ]
+            self.dashboard.setText('\n'.join(rows))
+            self.dashboard.setTextFormat(Qt.PlainText)
         def tick(self):
             if self.worker and self.worker.isRunning():
                 elapsed=int(time.monotonic()-self.phase_started)
@@ -374,39 +449,32 @@ def gui():
         def ready(self, result):
             self.timer.stop()
             if result['status']=='paused':
-                self.status.setText('Paused safely · resume this build using its result.json'); return
+                self.status.setText('Paused safely · you can close Adalaris'); return
             self.bar.setValue(self.bar.maximum())
             self.status.setText(('Verified archive ready: ' if result['fingerprints_verified'] else 'UNVERIFIED benchmark archive: ')+result['archive'])
         def failed(self, error):
             self.timer.stop(); self.status.setText('Stopped: '+error); self.log.appendPlainText('ERROR: '+error)
-        def start_build(self):
-            if self.worker and self.worker.isRunning(): return
-            if self.target.currentData() is None: self.status.setText('Load a valid manifest first'); return
-            for k in ('manifest','source','storage','gateway'): self.settings.setValue(k,getattr(self,k).text())
-            args=(Path(self.manifest.text()),Path(self.source.text() or self.manifest.text()).parent if not self.source.text() else Path(self.source.text()),Path(self.storage.text()).expanduser(),self.gateway.text().strip(),self.target.currentData(),not self.skip.isChecked(),None)
-            self.launch(args)
-        def request_pause(self):
+        def action(self):
             if self.worker and self.worker.isRunning():
-                self.worker.pause.set(); self.pause_button.setEnabled(False)
+                self.worker.pause.set(); self.start.setText('PAUSING…'); self.start.setEnabled(False)
                 self.message('Pause requested · waiting for the next safe checkpoint')
-        def resume_build(self):
-            if self.worker and self.worker.isRunning(): return
-            path=QFileDialog.getOpenFileName(self,'Select paused build result.json',self.storage.text(),'JSON (*.json)')[0]
-            if not path: return
+                return
             try:
-                record=read(Path(path))
-                if record.get('status')!='paused': raise ValueError('Only safely paused builds can resume')
-                c=record['config']
-                args=(Path(c['manifest']),Path(c['source']),Path(path).resolve().parent.parent,c['gateway'],c['end'],c['verify_fingerprints'],Path(path))
+                args=automatic_args(self.storage,not self.skip.isChecked())
                 self.launch(args)
             except Exception as exc: self.failed(str(exc))
         def finished(self):
-            self.start.setEnabled(True); self.resume_button.setEnabled(True); self.pause_button.setEnabled(False)
+            self.start.setEnabled(True)
+            paused=find_paused(self.storage)
+            self.start.setText('RESUME' if paused else 'RUN')
+            self.skip.setEnabled(not paused)
+            if paused: self.skip.setChecked(not paused[1]['config']['verify_fingerprints'])
         def launch(self,args):
-            self.start.setEnabled(False); self.resume_button.setEnabled(False); self.pause_button.setEnabled(True); self.log.clear(); self.bar.setValue(0); self.status.setText('Building a NEW isolated database…')
-            self.worker=Worker(args); self.worker.message.connect(self.message); self.worker.progress.connect(lambda n,t:(self.bar.setMaximum(t),self.bar.setValue(n))); self.worker.result.connect(self.ready); self.worker.failed.connect(self.failed); self.worker.finished.connect(self.finished); self.phase='Preparing build'; self.phase_started=time.monotonic(); self.timer.start(); self.worker.start()
+            self.start.setText('PAUSE'); self.start.setEnabled(True); self.skip.setEnabled(False)
+            self.log.clear(); self.bar.setValue(0); self.status.setText('Resuming build…' if args[6] else 'Building a new isolated database…')
+            self.worker=Worker(args); self.worker.message.connect(self.message); self.worker.progress.connect(lambda n,t:(self.bar.setMaximum(t),self.bar.setValue(n))); self.worker.stats.connect(self.show_stats); self.worker.result.connect(self.ready); self.worker.failed.connect(self.failed); self.worker.finished.connect(self.finished); self.phase='Preparing build'; self.phase_started=time.monotonic(); self.timer.start(); self.worker.start()
         def closeEvent(self,event):
-            if self.worker and self.worker.isRunning(): QMessageBox.information(self,'Build running','Use Pause safely and wait for confirmation before closing.'); event.ignore()
+            if self.worker and self.worker.isRunning(): QMessageBox.information(self,'Build running','Use PAUSE and wait for confirmation before closing.'); event.ignore()
             else: event.accept()
 
     app=QApplication(sys.argv); window=Window(); window.show(); return app.exec()
