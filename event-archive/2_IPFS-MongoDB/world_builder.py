@@ -218,7 +218,7 @@ def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, 
     entries = [e for e in entries if e['end_block'] <= end]
     # Import the existing tested delta engine, not a second implementation.
     sys.path.insert(0, str(ENGINE))
-    from delta import apply_package, unpack
+    from delta import apply_package, unpack, checkpoint
     from pymongo import MongoClient
     from pymongo.read_concern import ReadConcern
     from pymongo.write_concern import WriteConcern
@@ -328,6 +328,16 @@ def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, 
             info['applied_through']=-1; save()
         progress(len(entries)+2,len(entries)*2+3)
         db = client.get_database(DB,read_concern=ReadConcern('majority'),write_concern=WriteConcern(w='majority',j=True))
+        # Trust only a verified target from this uninterrupted process.
+        # On resume, the first pending delta performs a full source scan.
+        previous_verified = None
+        if resume and verify_fingerprints and info['applied_through'] == end:
+            log('Rechecking final checkpoint after resume before export…')
+            measured = {}
+            with unpack(files[-1], scratch) as (manifest, _):
+                checkpoint(db, manifest, 'target', scratch, 32*1024*1024, measured)
+            info['timings']['fingerprints_seconds'] += measured['seconds']
+            save()
         for i, (entry, path) in enumerate(zip(entries[1:],files[1:]),1):
             if entry['end_block'] <= info['applied_through']:
                 progress(len(entries)+2+i,len(entries)*2+3)
@@ -343,10 +353,15 @@ def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, 
             if details: log(' · '.join(details))
             if isinstance(entry.get('comment'), str): log('Checkpoint note: '+entry['comment'])
             log('Reading, writing and verifying database fingerprints — please wait…' if verify_fingerprints else 'Writing delta with package and operation checks only — please wait…')
-            result = apply_package(db,path,job/f'apply-{entry["end_block"]}.json',scratch,verify_fingerprints=verify_fingerprints)
+            if previous_verified is not None:
+                log('Reusing the previous verified fingerprint as the starting state')
+            result = apply_package(db,path,job/f'apply-{entry["end_block"]}.json',scratch,
+                                   verify_fingerprints=verify_fingerprints,
+                                   previous_verified_checkpoint=previous_verified)
             expected = 'applied_checkpoint_verified' if verify_fingerprints else 'applied_unverified_benchmark'
             if result['status'] != expected:
                 raise RuntimeError('Delta application failed')
+            previous_verified = result.get('verified_target_checkpoint') if verify_fingerprints else None
             metrics = result['metrics']; timings = info['timings']
             checks = sum(metrics[k].get('seconds',0) for k in ('starting_checkpoint','final_checkpoint'))
             writes = metrics['bulk_writes']['seconds']
