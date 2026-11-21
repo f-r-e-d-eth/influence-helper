@@ -1,4 +1,4 @@
-# Influence World Builder v0.1
+# Influence World Builder v0.2
 
 Experimental Linux desktop app. Builds a fresh, isolated MongoDB from the V12 bootstrap and verified deltas, without a Starknet node. Existing databases are never selected or overwritten. Each run creates a new uniquely named Docker container and volume, exposes MongoDB on an automatically assigned loopback port, and retains a compressed database archive, result JSON and application journals. Successful runs stop and remove their temporary container and volumes after the archive has been gzip-checked and hashed. A failed build is not ready to use; its container and volume are retained for inspection. Never start two containers against the same volume.
 
@@ -17,6 +17,20 @@ The desktop UI uses a single RUN / PAUSE / RESUME button and the benchmark check
 ## Backgrounds
 
 Place PNG, JPG, JPEG, WebP or BMP images in `~/Adalaris/backgrounds` (automatically created). The first image is shown on startup; the background advances in alphabetical filename order after each completed delta and wraps around. Resumed builds use the completed checkpoint count to restore their position. Invalid images are skipped; an empty folder uses the default gradient.
+
+## Streaming reconstruction (v0.2)
+
+The coordinator starts a background downloader and consumes packages in manifest order. At most two waiting packages (including any download in flight) are reserved, plus the package being applied. Each is validated by size and SHA256 before application. Downloaded packages are deleted from the per-build cache after successful checkpoint journaling; original local inputs are never deleted. A safe pause cancels prefetch and discards queued temporary downloads. Network failures before import preserve the last safely completed checkpoint for resume. A failed application is not automatically resumed.
+
+The dashboard displays download progress, speed, buffer occupancy and available disk space alongside import status. This is a package-count bound, not a byte quota: reserve space for MongoDB, up to three packages, fingerprint scratch files and the final export.
+
+The current default remains the installed manifest. To test a trusted regularly updated HTTPS manifest without copying it locally, launch with:
+
+```bash
+ADALARIS_MANIFEST_URL=https://your-trusted-manifest-host/manifest.json .venv/bin/python world_builder.py
+```
+
+A fresh build pins the fetched manifest; resume uses that pinned version. The publisher must provide reliable CIDs and hashes. No production URL is assumed until it is available. Test the bounded downloader independently with `python -m unittest -v test_pipeline`.
 
 ## Pause and resume
 
@@ -40,4 +54,4 @@ This validates bootstrap SHA256, every package SHA256 and the matching successfu
 
 ## Scope
 
-Version 0.1 builds a new world through the latest published checkpoint, shows progress and automatically resumes paused work. Incremental updates, signed remote manifest distribution, automatic IPFS publication and AppImage packaging are future work. Do not expose the unauthenticated local MongoDB port to the LAN or internet. For older builds or failures, stop an idle builder container with `docker stop <container name from result.json>`; it can be restarted with `docker start <name>`. This does not remove the world's persistent volume.
+Version 0.2 builds a new world through the latest published checkpoint, shows progress and automatically resumes paused work. Incremental updates, signed remote manifest distribution, automatic IPFS publication and AppImage packaging are future work. Do not expose the unauthenticated local MongoDB port to the LAN or internet. For older builds or failures, stop an idle builder container with `docker stop <container name from result.json>`; it can be restarted with `docker start <name>`. This does not remove the world's persistent volume.
