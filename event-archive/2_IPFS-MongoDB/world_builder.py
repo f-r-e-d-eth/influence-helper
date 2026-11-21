@@ -230,7 +230,7 @@ def build(manifest_path, source, storage, gateway, end, verify_fingerprints, log
     log('Archive saved and gzip checked. Removing temporary MongoDB container and volume…')
     run(['docker','stop','-t','120',name]); run(['docker','rm','-v',name]); run(['docker','volume','rm',name])
     shutil.rmtree(cache); shutil.rmtree(scratch)
-    info['cleanup_complete']=True; info['timings']['total_seconds']=time.monotonic()-started; save()
+    info['cleanup_complete']=True; info['uri']=None; info['timings']['total_seconds']=time.monotonic()-started; save()
     progress(len(entries)*2+3,len(entries)*2+3)
     log('Archive ready — '+str(archive))
     log(f'Total fingerprint scans: {info["timings"]["fingerprints_seconds"]:.1f} s · bulk writes: {info["timings"]["bulk_writes_seconds"]:.1f} s')
