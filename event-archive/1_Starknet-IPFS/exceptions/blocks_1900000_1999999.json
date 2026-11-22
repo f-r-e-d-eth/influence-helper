@@ -1,0 +1,20 @@
+{
+  "exceptions": [
+    {
+      "id": "building-extraction-transfer-invalid-uselot-1905718-3",
+      "type": "suppressEvent",
+      "reason": "PrepaidAgreementTransferred for building resource extraction emits an erroneous UseLot pointer; preserve raw event and agreement updates, suppress only the invalid tenancy projection.",
+      "event": "ComponentUpdated_Unique",
+      "version": 0,
+      "blockNumber": 1905718,
+      "blockHash": "0x395bdd4781d3f6585c31b078582d6131dee4f781df449e245d7e21f3e846bf0",
+      "transactionHash": "0x054ec2469fb30769a89554dd8609f61d1879fcdab894c23f55de72c02166208f",
+      "transactionIndex": 6,
+      "logIndex": 3,
+      "address": "0x0422d33a3638dcc4c62e72e1d6942cd31eb643ef596ccac2351e0e21f6cd4bf4",
+      "keys": ["0x297be67eb977068ccd2304c6440368d4a6114929aeb860c98b6a7e91f96e2ef", "0x556e69717565"],
+      "data": ["0x2", "0x5573654c6f74", "0x2b660005", "0x29120001"],
+      "expectedReturnValues": {"entity": {"label": 5, "id": 11110}, "tenant": {"label": 1, "id": 10514}}
+    }
+  ]
+}
