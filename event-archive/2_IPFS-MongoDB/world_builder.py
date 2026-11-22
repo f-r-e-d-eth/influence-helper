@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Adalaris v0.2 — streaming world reconstruction."""
+"""Adalaris v0.3 — streaming reconstruction with recovery archives."""
 import argparse
 import sys
 import threading
 import time
 from pathlib import Path
 from manifest import make_manifest, read, validate, STEP
-from coordinator import (build, automatic_args, find_paused, background_files, last_activity, WORLDS, BACKGROUNDS)
+from coordinator import (build, automatic_args, find_paused, background_files, last_activity, WORLDS, BACKGROUNDS, SETTINGS)
+from settings import load_settings, next_check
 
 def gui():
     from PySide6.QtCore import Qt, QThread, Signal, QSettings, QTimer
@@ -23,13 +24,13 @@ def gui():
 
     class Window(QWidget):
         def __init__(self):
-            super().__init__(); self.setWindowTitle('Adalaris · Influence World Builder v0.2'); self.resize(1120,900)
+            super().__init__(); self.setWindowTitle('Adalaris · Influence World Builder v0.3'); self.resize(1120,900)
             self.settings=QSettings('InfluenceHelper','WorldBuilder'); self.worker=None
             self.image=QPixmap(); self.background_index=None; self.opacity=max(0,min(100,int(self.settings.value('opacity',88))))
             self.set_background(0)
             outer=QVBoxLayout(self); outer.setContentsMargins(28,28,28,28); outer.setSpacing(16)
             title=QLabel('ADALARIS  /  INFLUENCE WORLD BUILDER'); title.setStyleSheet('font-size: 28px; font-weight: 700; color: #e8f8ff'); outer.addWidget(title)
-            sub=QLabel('V0.2  ·  RECONSTRUCT A VERIFIED LOCAL WORLD'); sub.setStyleSheet('color: #9ec7d8; font-size: 13px'); outer.addWidget(sub)
+            sub=QLabel('V0.3  ·  RECONSTRUCT A VERIFIED LOCAL WORLD'); sub.setStyleSheet('color: #9ec7d8; font-size: 13px'); outer.addWidget(sub)
             self.panel=QFrame(); self.panel.setObjectName('panel'); outer.addWidget(self.panel); layout=QVBoxLayout(self.panel); layout.setSpacing(12); layout.setContentsMargins(20,20,20,20)
             self.storage = WORLDS
             self.skip=QCheckBox('Benchmark only — skip database fingerprints (UNVERIFIED archive)'); self.skip.setStyleSheet('color:#f7d38b'); layout.addWidget(self.skip)
@@ -39,6 +40,7 @@ def gui():
             self.download_label=QLabel('Download · waiting'); self.download_label.setWordWrap(True); layout.addWidget(self.download_label)
             self.download_bar=QProgressBar(); self.download_bar.setRange(0,100); self.download_bar.setValue(0); layout.addWidget(self.download_bar)
             self.dashboard=QLabel(); self.dashboard.setWordWrap(True); self.dashboard.setStyleSheet('font-size:15px; padding:12px; color:#d8f3f5'); layout.addWidget(self.dashboard)
+            self.recovery_label=QLabel('Recovery archive · waiting'); self.recovery_label.setWordWrap(True); layout.addWidget(self.recovery_label)
             self.activity_title=QLabel('LAST COMPLETED DELTA · COLLECTION ACTIVITY'); self.activity_title.setStyleSheet('font-size:16px;font-weight:bold;color:#d8f3f5'); layout.addWidget(self.activity_title)
             charts=QHBoxLayout(); charts.setSpacing(20); layout.addLayout(charts)
             self.scan_chart=self.make_chart(charts,'Documents scanned · final fingerprint','#67cfbd')
@@ -74,6 +76,7 @@ def gui():
                 scaled=self.image.scaled(self.size(),Qt.KeepAspectRatioByExpanding,Qt.SmoothTransformation); painter.drawPixmap((self.width()-scaled.width())//2,(self.height()-scaled.height())//2,scaled)
         def refresh_idle(self):
             try:
+                settings=load_settings(SETTINGS)
                 args=automatic_args(self.storage,not self.skip.isChecked())
                 self.start.setEnabled(True)
                 self.skip.setEnabled(args[6] is None)
@@ -84,15 +87,20 @@ def gui():
                     last=record.get('applied_through')
                     self.show_stats(dict(stage='Paused',target=args[4],applied=last,
                         checkpoints=(last+1)//STEP if last is not None else 0,total_checkpoints=(args[4]+1)//STEP,
-                        verification=args[5],timings=record.get('timings',{}),activity=last_activity(args[6].parent,last)))
+                        verification=args[5],timings=record.get('timings',{}),activity=last_activity(args[6].parent,last),
+                        verified=record.get('verified_through'), recovery=record.get('recovery_archives',[]),
+                        recovery_status=record.get('recovery_status','Waiting'),
+                        next_verification=next_check(last,args[4],record['config'].get('settings',settings)) if args[5] else None))
                 else:
                     self.start.setText('RUN')
                     if args[0] is None:
+                        self.recovery_label.setText(f"Recovery interval: {settings['checkpoint']['interval_blocks']:,} blocks" if settings['checkpoint']['enabled'] else 'Recovery archives disabled')
                         self.status.setText('Ready · manifest will be fetched from configured HTTPS source'); return
                     entries=validate(read(args[0]))
                     self.status.setText(f'Ready · {len(entries)-1} available checkpoints')
                     self.show_stats(dict(stage='Ready',target=args[4],total_checkpoints=len(entries)-1,
-                        checkpoints=0,input_bytes=sum(e['bytes'] for e in entries),verification=args[5]))
+                        checkpoints=0,input_bytes=sum(e['bytes'] for e in entries),verification=args[5],
+                        next_verification=next_check(None,args[4],settings) if args[5] else None))
             except Exception as exc:
                 self.start.setText('RUN'); self.start.setEnabled(True); self.skip.setEnabled(True)
                 self.status.setText(str(exc))
@@ -150,7 +158,8 @@ def gui():
             e=data.get('current',{}); t=data.get('timings',{})
             rows=[
                 f"Target block: {number(data.get('target'))}     ·     Completed: {number(data.get('applied'))}",
-                f"Checkpoints: {data.get('checkpoints',0)} / {data.get('total_checkpoints',0)}     ·     {'Verified mode' if data.get('verification') else 'Benchmark mode'}",
+                f"Deltas: {data.get('checkpoints',0)} / {data.get('total_checkpoints',0)}     ·     {'Verified mode' if data.get('verification') else 'Benchmark mode'}",
+                f"Last verified: {number(data.get('verified'))}     ·     Next full check: {number(data.get('next_verification'))}",
                 f"Current file: {e.get('filename','—')}     ·     {size(e.get('bytes'))}",
                 f"Expected target documents: {number(e.get('target_documents'))}     ·     Planned operations: {number(e.get('completed_operations'))}",
                 f"Completed documents (manifest): {number(data.get('documents'))}     ·     Completed operations (manifest): {number(data.get('operations_done'))}",
@@ -159,6 +168,11 @@ def gui():
             ]
             self.dashboard.setText('\n'.join(rows))
             self.dashboard.setTextFormat(Qt.PlainText)
+            recovery=data.get('recovery',[]); latest=recovery[-1] if recovery else {}
+            status=data.get('recovery_status','Waiting')
+            disk=data.get('free_bytes'); free=f'{disk/1024**3:,.1f} GiB' if type(disk) is int else '—'
+            self.recovery_label.setText(f"Recovery · {status} · Last saved: {number(latest.get('block'))} · {size(latest.get('bytes'))} · Disk free: {free}")
+            self.recovery_label.setStyleSheet('color:#67cfbd' if recovery or status=='Final archive saved' else 'color:#f7d38b')
             self.show_activity(data.get('activity'))
         def tick(self):
             if self.worker and self.worker.isRunning():

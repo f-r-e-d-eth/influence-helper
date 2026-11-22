@@ -4,14 +4,16 @@ from pathlib import Path
 from manifest import digest, read, validate, fetch_manifest, STEP
 from downloader import Prefetch, Cancelled
 from importer import run, restore_bootstrap, export_archive
+from settings import load_settings, validate_settings, scheduled, next_check, enough_space
 ROOT = Path(__file__).resolve().parent
-ENGINE = ROOT.parent / 'v12' / 'v12-delta'
+ENGINE = ROOT / 'delta-engine'
 STEP = 100_000
 DB = 'v12_disposable_world_builder'
 APP_HOME = Path.home() / 'Adalaris'
 DATA = APP_HOME / 'data'
 WORLDS = APP_HOME / 'worlds'
 BACKGROUNDS = APP_HOME / 'backgrounds'
+SETTINGS = APP_HOME / 'settings.json'
 GATEWAY = 'https://ipfs.filebase.io'
 MANIFEST_URL = 'https://raw.githubusercontent.com/f-r-e-d-eth/influence-helper/main/event-archive/2_IPFS-MongoDB/manifest.json'
 
@@ -34,7 +36,7 @@ def last_activity(job, block):
     if type(block) is not int or block < 0: return None
     try:
         journal = read(job/f'apply-{block}.json')
-        if journal.get('status') not in ('applied_checkpoint_verified', 'applied_unverified_benchmark'):
+        if journal.get('status') not in ('applied_checkpoint_verified', 'applied_unverified_benchmark', 'applied_verification_deferred'):
             return None
         return dict(block=block, **collection_activity(journal))
     except (OSError, ValueError):
@@ -109,7 +111,7 @@ def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, 
     if end not in [e['end_block'] for e in entries[1:]]:
         raise ValueError('Select a checkpoint in the manifest')
     entries = [e for e in entries if e['end_block'] <= end]
-    # Import the existing tested delta engine, not a second implementation.
+    # Use the consumer-local engine; producer code remains unchanged.
     sys.path.insert(0, str(ENGINE))
     from delta import apply_package, unpack, checkpoint
     from pymongo import MongoClient
@@ -123,18 +125,25 @@ def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, 
     name = 'influence-world-'+job.name.removeprefix('build-')
     info = read(job/'result.json') if resume else None
     if resume:
+        if 'settings' not in info.get('config', {}):
+            raise ValueError('Resume v0.2 paused builds using the archived v0.2 application')
+        settings = validate_settings(info['config']['settings'])
+    else:
+        settings = load_settings(SETTINGS)
+    config['settings'] = settings
+    if resume:
         if (info.get('status') != 'paused' or info.get('config') != config or
                 info.get('container') != name or info.get('volume') != name or info.get('database') != DB):
             raise ValueError('Not a matching safely paused build')
         last = info.get('applied_through')
         if last not in [e['end_block'] for e in entries]:
             raise ValueError('Invalid paused checkpoint')
-        expected = 'applied_checkpoint_verified' if verify_fingerprints else 'applied_unverified_benchmark'
+        expected = ('applied_checkpoint_verified', 'applied_verification_deferred') if verify_fingerprints else ('applied_unverified_benchmark',)
         for entry in entries[1:]:
             journal = job/f'apply-{entry["end_block"]}.json'
             if entry['end_block'] <= last:
                 record = read(journal)
-                if record['status'] != expected or record['package_sha256'] != entry['sha256']:
+                if record['status'] not in expected or record['package_sha256'] != entry['sha256']:
                     raise ValueError('Paused journal mismatch')
             elif journal.exists():
                 raise ValueError('Unexpected later journal; cannot safely resume')
@@ -157,7 +166,10 @@ def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, 
                    current=entry, timings=dict(info['timings']) if info else {},
                    verification=verify_fingerprints, input_bytes=sum(e['bytes'] for e in entries),
                    archive_bytes=info.get('archive_bytes') if info else None,
-                   activity=last_activity(job,last)))
+                   activity=last_activity(job,last), verified=info.get('verified_through'),
+                   recovery=list(info.get('recovery_archives',[])), recovery_status=info.get('recovery_status','Waiting'),
+                   next_verification=next_check(last,end,settings) if verify_fingerprints else None,
+                   free_bytes=shutil.disk_usage(job).free))
     # A legacy paused build may have cached all packages. Remove only known
     # generated cache files; original input files are never removed.
     for entry in entries:
@@ -167,7 +179,8 @@ def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, 
     pending=[e for e in entries if last is None or e['end_block']>last]
     if resume and verify_fingerprints and last==end:
         pending=[entries[-1]]  # recheck last fingerprint before export
-    with Prefetch(pending,source,cache,gateway,log,download_stats or (lambda data:None)) as pipeline:
+    with Prefetch(pending,source,cache,gateway,log,download_stats or (lambda data:None),
+                  capacity=settings['download']['prefetch_deltas'], attempts=settings['download']['max_retries']) as pipeline:
         return reconstruct(pipeline, entries, end, verify_fingerprints, info, config, name, job, cache, scratch,
                            resume, pause, stats, report, log, progress, started, apply_package, unpack, checkpoint,
                            MongoClient, ReadConcern, WriteConcern)
@@ -176,14 +189,17 @@ def build_locked(manifest_path, source, gateway, end, verify_fingerprints, log, 
 def reconstruct(pipeline, entries, end, verify_fingerprints, info, config, name, job, cache, scratch,
                 resume, pause, stats, report, log, progress, started, apply_package, unpack, checkpoint,
                 MongoClient, ReadConcern, WriteConcern):
+    from delta import checkpoint_identity
+    settings = config['settings']
     if not resume:
         bootstrap=pipeline.take(entries[0])
         report('Preparing MongoDB')
         log(f'Creating isolated MongoDB container {name} — Docker may download the image on first use. Please wait.')
-        container_id = run(['docker','run','-d','--name',name,'--label','influence.world-builder=0.2',
+        container_id = run(['docker','run','-d','--name',name,'--label','influence.world-builder=0.3',
              '-p','127.0.0.1::27017','-v',name+':/data/db','mongo:7','mongod','--wiredTigerCacheSizeGB','2'], capture_output=True,text=True).stdout.strip()
         info.update(dict(container=name, container_id=container_id, volume=name, database=DB, status='incomplete',
-                    verified_through=None, applied_through=None, fingerprints_verified=verify_fingerprints, config=config,
+                    verified_through=None, applied_through=None, fingerprints_verified=False, config=config,
+                    recovery_archives=[], recovery_status='Waiting' if verify_fingerprints and settings['checkpoint']['enabled'] else 'Disabled',
                     timings={'fingerprints_seconds':0.0,'bulk_writes_seconds':0.0,'application_seconds':0.0}))
     def save():
         tmp = job/'result.tmp'
@@ -191,6 +207,19 @@ def reconstruct(pipeline, entries, end, verify_fingerprints, info, config, name,
             json.dump(info,stream,indent=2); stream.write('\n'); stream.flush(); os.fsync(stream.fileno())
         os.replace(tmp,job/'result.json')
         fd=os.open(job,os.O_RDONLY); os.fsync(fd); os.close(fd)
+    def save_recovery(block):
+        archive=job/f'recovery-{block}.archive.gz'
+        checksum=export_archive(name,DB,archive)
+        record=dict(block=block,archive=archive.name,bytes=archive.stat().st_size,sha256=checksum)
+        info['recovery_archives'].append(record)
+        info['recovery_status']='Saved'; save()
+        # Only remove old, recorded archives after the replacement is durable.
+        while len(info['recovery_archives']) > settings['checkpoint']['keep_checkpoints']:
+            old=info['recovery_archives'][0]
+            if old['archive'] != f"recovery-{old['block']}.archive.gz": raise ValueError('Unexpected recovery filename')
+            (job/old['archive']).unlink(missing_ok=True)
+            info['recovery_archives'].pop(0); save()
+        log(f'Recovery archive saved at {block:,} ({record["bytes"] / 1024**2:.1f} MiB)')
     info['status']='incomplete'; save()
     if resume:
         log(f'Restarting paused container {name}')
@@ -232,15 +261,21 @@ def reconstruct(pipeline, entries, end, verify_fingerprints, info, config, name,
         db = client.get_database(DB,read_concern=ReadConcern('majority'),write_concern=WriteConcern(w='majority',j=True))
         # Trust only a verified target from this uninterrupted process.
         # On resume, the first pending delta performs a full source scan.
-        previous_verified = None
+        previous_expected = None
+        source_scan = verify_fingerprints
+        resume_identity = None
+        if resume and info['applied_through'] >= 0:
+            resume_identity = read(job/f"apply-{info['applied_through']}.json")['expected_target_checkpoint']
         if resume and verify_fingerprints and info['applied_through'] == end:
             log('Rechecking final checkpoint after resume before export…')
             measured = {}
             path=pipeline.take(entries[-1])
             with unpack(path, scratch) as (manifest, _):
                 if manifest['target_block']!=end or manifest['source_block']!=end-STEP: raise ValueError('Delta block boundary mismatch')
+                if resume_identity != json.loads(json.dumps(checkpoint_identity(manifest,'target'))): raise ValueError('Paused final checkpoint continuity mismatch')
                 checkpoint(db, manifest, 'target', scratch, 32*1024*1024, measured)
             info['timings']['fingerprints_seconds'] += measured['seconds']
+            info['verified_through']=end
             save(); pipeline.discard(path)
         for i, entry in enumerate(entries[1:],1):
             if entry['end_block'] <= info['applied_through']:
@@ -261,8 +296,16 @@ def reconstruct(pipeline, entries, end, verify_fingerprints, info, config, name,
             with unpack(path,scratch) as (manifest,_):
                 if manifest['source_block']!=entry['end_block']-STEP or manifest['target_block']!=entry['end_block']:
                     raise ValueError('Delta block boundary mismatch')
+                target_identity=checkpoint_identity(manifest,'target')
+                if previous_expected is not None and previous_expected != checkpoint_identity(manifest,'source'):
+                    raise ValueError('Delta checkpoint continuity mismatch')
+                if resume_identity is not None and resume_identity != json.loads(json.dumps(checkpoint_identity(manifest,'source'))):
+                    raise ValueError('Paused delta checkpoint continuity mismatch')
+            block=entry['end_block']
+            recovery_due=verify_fingerprints and scheduled(block,end,settings)
+            target_scan=verify_fingerprints and (block==end or recovery_due or settings['verification']['verify_every_delta'])
             report('Applying delta', entry)
-            log(f'Applying{" and verifying" if verify_fingerprints else " (benchmark, no fingerprints)"} through {entry["end_block"]:,}')
+            log(f'Applying{" and verifying" if target_scan else " (fingerprint deferred)" if verify_fingerprints else " (benchmark, no fingerprints)"} through {block:,}')
             details = []
             for key, label in (('completed_operations','operations'), ('target_documents','target documents')):
                 if isinstance(entry.get(key), int): details.append(f'{entry[key]:,} {label}')
@@ -270,16 +313,16 @@ def reconstruct(pipeline, entries, end, verify_fingerprints, info, config, name,
                 details.append(f'previous verified application: {entry["application_seconds"]/60:.1f} min')
             if details: log(' · '.join(details))
             if isinstance(entry.get('comment'), str): log('Checkpoint note: '+entry['comment'])
-            log('Reading, writing and verifying database fingerprints — please wait…' if verify_fingerprints else 'Writing delta with package and operation checks only — please wait…')
-            if previous_verified is not None:
-                log('Reusing the previous verified fingerprint as the starting state')
+            log('Reading, writing and verifying database fingerprints — please wait…' if target_scan or source_scan else 'Writing delta with package and operation checks only — please wait…')
             result = apply_package(db,path,job/f'apply-{entry["end_block"]}.json',scratch,
-                                   verify_fingerprints=verify_fingerprints,
-                                   previous_verified_checkpoint=previous_verified)
-            expected = 'applied_checkpoint_verified' if verify_fingerprints else 'applied_unverified_benchmark'
+                                   verify_fingerprints=verify_fingerprints, verify_source=source_scan,
+                                   verify_target=target_scan, expected_source=previous_expected, deferred=verify_fingerprints)
+            expected = 'applied_checkpoint_verified' if target_scan else 'applied_verification_deferred' if verify_fingerprints else 'applied_unverified_benchmark'
             if result['status'] != expected:
                 raise RuntimeError('Delta application failed')
-            previous_verified = result.get('verified_target_checkpoint') if verify_fingerprints else None
+            previous_expected = target_identity
+            resume_identity = None
+            source_scan = False
             metrics = result['metrics']; timings = info['timings']
             checks = sum(metrics[k].get('seconds',0) for k in ('starting_checkpoint','final_checkpoint'))
             writes = metrics['bulk_writes']['seconds']
@@ -287,21 +330,38 @@ def reconstruct(pipeline, entries, end, verify_fingerprints, info, config, name,
             timings['application_seconds'] += result['application_seconds']
             log(f'Checkpoint: fingerprint scans {checks:.1f} s · bulk writes {writes:.1f} s · total {result["application_seconds"]:.1f} s')
             info['applied_through'] = entry['end_block']
-            if verify_fingerprints: info['verified_through'] = entry['end_block']
+            if target_scan: info['verified_through'] = block
             save()
             pipeline.discard(path)
+            if recovery_due:
+                logical=int(db.command('dbStats').get('dataSize',0))
+                waiting=sorted((e['bytes'] for e in entries if e['end_block']>block),reverse=True)[:settings['download']['prefetch_deltas']+1]
+                if enough_space(job,logical,sum(waiting),settings):
+                    info['recovery_status']='Saving'; report('Saving recovery archive',entry)
+                    save_recovery(block)
+                else:
+                    info['recovery_status']='Skipped: insufficient free space'; save()
+                    log('Recovery archive skipped — insufficient estimated free space; previous archive retained')
             report('Checkpoint complete', entry)
             progress(i+1,len(entries)+2)
     if pause_at_boundary(): return info
     pipeline.close()
+    if verify_fingerprints and info['verified_through'] != end:
+        raise RuntimeError('Final fingerprint has not been verified')
     report('Exporting database')
     log('Exporting final database as compressed MongoDB archive…')
     export_started = time.monotonic()
     archive = job / (f'adalaris-{end}.archive.gz' if verify_fingerprints else f'adalaris-{end}-UNVERIFIED.archive.gz')
     checksum=export_archive(name,DB,archive)
-    info.update(archive=str(archive),archive_bytes=archive.stat().st_size,archive_sha256=checksum,
+    info.update(archive=str(archive),archive_bytes=archive.stat().st_size,archive_sha256=checksum,fingerprints_verified=verify_fingerprints,
                 status='exported_verified' if verify_fingerprints else 'exported_unverified_benchmark',cleanup_complete=False)
     info['timings']['export_seconds']=time.monotonic()-export_started; save()
+    if verify_fingerprints:
+        info['recovery_status']='Final archive saved'; save()
+        for old in list(info['recovery_archives']):
+            if old['archive'] != f"recovery-{old['block']}.archive.gz": raise ValueError('Unexpected recovery filename')
+            (job/old['archive']).unlink(missing_ok=True)
+            info['recovery_archives'].remove(old); save()
     progress(len(entries)+1,len(entries)+2)
     log('Archive saved and gzip checked. Removing temporary MongoDB container and volume…')
     run(['docker','stop','-t','120',name]); run(['docker','rm','-v',name]); run(['docker','volume','rm',name])

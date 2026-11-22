@@ -11,7 +11,7 @@ from manifest import digest
 class Cancelled(Exception):
     pass
 
-def acquire(entry, source, cache, gateway, log, stop, notify):
+def acquire(entry, source, cache, gateway, log, stop, notify, attempts=3):
     name=entry['filename']
     def check(path):
         return path.is_file() and path.stat().st_size==entry['bytes'] and digest(path)==entry['sha256']
@@ -23,12 +23,12 @@ def acquire(entry, source, cache, gateway, log, stop, notify):
     if not gateway.startswith('https://') or not entry.get('cid'):
         raise ValueError(f'No matching local file or HTTPS IPFS CID for {name}')
     dest=cache/name
-    for attempt in range(3):
+    for attempt in range(attempts):
         partial=cache/(name+'.'+uuid.uuid4().hex+'.part')
         started=time.monotonic(); count=0
         try:
             if stop.is_set(): raise Cancelled()
-            log(f'Downloading {name} (attempt {attempt+1}/3)')
+            log(f'Downloading {name} (attempt {attempt+1}/{attempts})')
             with urllib.request.urlopen(gateway.rstrip('/')+'/ipfs/'+entry['cid'],timeout=20) as response, partial.open('xb') as out:
                 if not response.geturl().startswith('https://'): raise ValueError('Insecure redirect')
                 while True:
@@ -47,16 +47,16 @@ def acquire(entry, source, cache, gateway, log, stop, notify):
             return dest
         except Cancelled: raise
         except Exception:
-            if attempt==2: raise
+            if attempt==attempts-1: raise
             if stop.wait(2**attempt): raise Cancelled()
         finally:
             partial.unlink(missing_ok=True)
 
 class Prefetch:
     """Two reserved waiting slots, including the in-flight download."""
-    def __init__(self, entries, source, cache, gateway, log, notify=lambda data:None, capacity=2, acquire_fn=acquire):
+    def __init__(self, entries, source, cache, gateway, log, notify=lambda data:None, capacity=2, acquire_fn=acquire, attempts=3):
         self.entries=list(entries); self.source=source; self.cache=cache; self.gateway=gateway
-        self.log=log; self.notify=lambda data:notify(dict(data,free_bytes=shutil.disk_usage(cache).free)); self.acquire=acquire_fn
+        self.log=log; self.notify=lambda data:notify(dict(data,free_bytes=shutil.disk_usage(cache).free)); self.acquire=(lambda *args: acquire(*args,attempts=attempts)) if acquire_fn is acquire else acquire_fn
         self.stop=threading.Event(); self.slots=threading.Semaphore(capacity)
         self.ready=queue.Queue(); self.error=None; self.finished=threading.Event()
         self.thread=threading.Thread(target=self._produce,name='Adalaris download')

@@ -22,4 +22,7 @@ def export_archive(name, database, archive):
         while stream.read(1024*1024): pass
     checksum=digest(partial)
     os.replace(partial,archive)
+    fd=os.open(archive.parent,os.O_RDONLY)
+    try: os.fsync(fd)
+    finally: os.close(fd)
     return checksum
